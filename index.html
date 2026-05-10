@@ -103,7 +103,12 @@
     // ══════════════════════════════════════════════════
     // 🔌  SUPABASE CLIENT
     // ══════════════════════════════════════════════════
-    const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        storage: window.localStorage,
+        detectSessionInUrl: false,
+      }
+    });
 
     // ══════════════════════════════════════════════════
     // 💱  CURRENCIES  (supported by frankfurter.app)
@@ -567,8 +572,13 @@
 
       const load = useCallback(async () => {
         setLoading(true);
-        setTrips(await fetchTrips());
-        setLoading(false);
+        try {
+          setTrips(await fetchTrips());
+        } catch (e) {
+          console.error('Failed to load trips:', e);
+        } finally {
+          setLoading(false);
+        }
       }, []);
 
       useEffect(() => { load(); }, [load]);
@@ -780,13 +790,18 @@
 
       const load = useCallback(async () => {
         setLoading(true);
-        const [m, e] = await Promise.all([
-          fetchTripMembers(trip.id),
-          fetchExpenses(trip.id),
-        ]);
-        setMembers(m);
-        setExpenses(e);
-        setLoading(false);
+        try {
+          const [m, e] = await Promise.all([
+            fetchTripMembers(trip.id),
+            fetchExpenses(trip.id),
+          ]);
+          setMembers(m);
+          setExpenses(e);
+        } catch (e) {
+          console.error('Failed to load trip data:', e);
+        } finally {
+          setLoading(false);
+        }
       }, [trip.id]);
 
       useEffect(() => { load(); }, [load]);
