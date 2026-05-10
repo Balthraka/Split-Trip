@@ -435,10 +435,18 @@
       }, []);
 
       useEffect(() => {
-        db.auth.getSession().then(async ({ data: { session } }) => {
-          if (session?.user) await onSignIn(session.user);
-          setBooting(false);
-        });
+        const timeout = setTimeout(() => setBooting(false), 8000);
+
+        db.auth.getSession()
+          .then(async ({ data: { session } }) => {
+            clearTimeout(timeout);
+            if (session?.user) await onSignIn(session.user);
+            setBooting(false);
+          })
+          .catch(() => {
+            clearTimeout(timeout);
+            setBooting(false);
+          });
 
         const { data: { subscription } } = db.auth.onAuthStateChange(async (event, session) => {
           if (event === 'SIGNED_IN' && session?.user) await onSignIn(session.user);
