@@ -1,0 +1,1384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <title>SplitTrip</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Sora', 'sans-serif'] },
+          colors: {
+            cream: '#F5F0E8',
+            parchment: '#EDE8DF',
+            ink: '#1E1B16',
+            muted: '#7A7163',
+            gold: { DEFAULT: '#C8964C', light: '#F5E6C8', dark: '#9C6F2E' },
+            moss: { DEFAULT: '#3D8B5E', light: '#D4EDDF' },
+            rose: { DEFAULT: '#C0392B', light: '#FAE0DD' },
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    * { font-family: 'Sora', sans-serif; }
+    body { background-color: #F5F0E8; }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(100%); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .fade-up  { animation: fadeUp  0.28s cubic-bezier(0.16,1,0.3,1) both; }
+    .slide-up { animation: slideUp 0.32s cubic-bezier(0.16,1,0.3,1) both; }
+
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid rgba(255,255,255,0.35);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    .spinner-dark {
+      border-color: rgba(30,27,22,0.2);
+      border-top-color: #1E1B16;
+    }
+
+    /* Scrollbars */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #C8B89A; border-radius: 2px; }
+
+    /* Input styling override */
+    input[type="number"]::-webkit-inner-spin-button { opacity: 0.4; }
+
+    /* Checkbox */
+    input[type="checkbox"] { accent-color: #C8964C; }
+    input[type="radio"]    { accent-color: #C8964C; }
+
+    /* Modal */
+    .modal-bg { backdrop-filter: blur(6px); background: rgba(30,27,22,0.45); }
+  </style>
+</head>
+
+<body class="min-h-screen">
+  <div id="root"></div>
+
+  <!-- Dependencies -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+
+  <script type="text/babel" data-presets="react">
+
+    // ══════════════════════════════════════════════════
+    // ⚙️  CONFIG  — paste your Supabase values here
+    // ══════════════════════════════════════════════════
+    const SUPABASE_URL      = 'https://YOUR_PROJECT_ID.supabase.co';
+    const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+    // ══════════════════════════════════════════════════
+    // 🔌  SUPABASE CLIENT
+    // ══════════════════════════════════════════════════
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // ══════════════════════════════════════════════════
+    // 💱  CURRENCIES  (supported by frankfurter.app)
+    // ══════════════════════════════════════════════════
+    const CURRENCIES = [
+      'AUD','BGN','BRL','CAD','CHF','CNY','CZK','DKK',
+      'EUR','GBP','HKD','HUF','IDR','ILS','INR','ISK',
+      'JPY','KRW','MXN','MYR','NOK','NZD','PHP','PLN',
+      'RON','SEK','SGD','THB','TRY','USD','ZAR',
+    ].sort();
+
+    // ══════════════════════════════════════════════════
+    // 🔄  EXCHANGE RATE  (cached, historical by date)
+    // ══════════════════════════════════════════════════
+    const _ratesCache = {};
+
+    async function getRate(from, to, date) {
+      if (from === to) return 1;
+      const key = `${from}→${to}@${date}`;
+      if (_ratesCache[key] !== undefined) return _ratesCache[key];
+      try {
+        const res  = await fetch(`https://api.frankfurter.app/${date}?from=${from}&to=${to}`);
+        const data = await res.json();
+        const rate = data.rates?.[to] ?? 1;
+        _ratesCache[key] = rate;
+        return rate;
+      } catch {
+        return 1; // safe fallback if API unreachable
+      }
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🧮  SETTLEMENT ALGORITHM
+    // Returns: { settlements: [{from,to,amount}], balances: {memberId: number} }
+    // ══════════════════════════════════════════════════
+    async function computeSettlements(expenses, members, baseCurrency) {
+      const balances = {};
+      members.forEach(m => { balances[m.id] = 0; });
+
+      for (const exp of expenses) {
+        const rate = await getRate(exp.currency, baseCurrency, exp.date);
+        if (balances[exp.paid_by_member_id] !== undefined) {
+          balances[exp.paid_by_member_id] += exp.amount * rate;
+        }
+        for (const split of (exp.expense_splits || [])) {
+          const splitBase = split.amount * rate;
+          if (balances[split.member_id] !== undefined) {
+            balances[split.member_id] -= splitBase;
+          }
+        }
+      }
+
+      // Round balances
+      Object.keys(balances).forEach(k => {
+        balances[k] = Math.round(balances[k] * 100) / 100;
+      });
+
+      // Minimize number of transactions (greedy)
+      const pos = [], neg = [];
+      Object.entries(balances).forEach(([id, bal]) => {
+        if (bal > 0.005)  pos.push({ id, bal });
+        if (bal < -0.005) neg.push({ id, bal });
+      });
+      pos.sort((a, b) => b.bal - a.bal);
+      neg.sort((a, b) => a.bal - b.bal);
+
+      const settlements = [];
+      let i = 0, j = 0;
+      while (i < pos.length && j < neg.length) {
+        const amount = Math.min(pos[i].bal, -neg[j].bal);
+        if (amount > 0.005) {
+          settlements.push({
+            from: neg[j].id, to: pos[i].id,
+            amount: Math.round(amount * 100) / 100,
+          });
+        }
+        pos[i].bal -= amount;
+        neg[j].bal += amount;
+        if (pos[i].bal < 0.005) i++;
+        if (neg[j].bal > -0.005) j++;
+      }
+
+      return { settlements, balances };
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🗄️  DATABASE HELPERS
+    // ══════════════════════════════════════════════════
+    async function claimMemberships() {
+      try { await db.rpc('claim_memberships'); } catch {}
+    }
+
+    async function fetchProfile(userId) {
+      const { data } = await db.from('profiles').select('*').eq('id', userId).single();
+      return data;
+    }
+
+    async function fetchTrips() {
+      // RLS automatically filters to trips the current user is a member of
+      const { data } = await db
+        .from('trips')
+        .select('*, trip_members(id, name, user_id)')
+        .order('created_at', { ascending: false });
+      return data || [];
+    }
+
+    async function fetchTripMembers(tripId) {
+      const { data } = await db
+        .from('trip_members')
+        .select('*')
+        .eq('trip_id', tripId)
+        .order('created_at');
+      return data || [];
+    }
+
+    async function fetchExpenses(tripId) {
+      const { data } = await db
+        .from('expenses')
+        .select('*, expense_splits(*)')
+        .eq('trip_id', tripId)
+        .order('date', { ascending: false })
+        .order('created_at', { ascending: false });
+      return data || [];
+    }
+
+    async function createTrip(name, description, baseCurrency, createdBy, members) {
+      const { data: trip, error } = await db
+        .from('trips')
+        .insert({ name, description, base_currency: baseCurrency, created_by: createdBy })
+        .select().single();
+      if (error) throw error;
+
+      const rows = members.map(m => ({
+        trip_id: trip.id,
+        name: m.name,
+        email: m.email || null,
+        user_id: m.userId || null,
+      }));
+      const { error: me } = await db.from('trip_members').insert(rows);
+      if (me) throw me;
+      return trip;
+    }
+
+    async function addMemberToTrip(tripId, name, email) {
+      const { data, error } = await db
+        .from('trip_members')
+        .insert({ trip_id: tripId, name, email: email || null })
+        .select().single();
+      if (error) throw error;
+      return data;
+    }
+
+    async function saveExpense(tripId, expenseData, splits, userId) {
+      const { data: exp, error } = await db
+        .from('expenses')
+        .insert({ trip_id: tripId, ...expenseData, created_by: userId })
+        .select().single();
+      if (error) throw error;
+
+      const splitRows = splits.map(s => ({
+        expense_id: exp.id,
+        member_id: s.memberId,
+        amount: s.amount,
+      }));
+      const { error: se } = await db.from('expense_splits').insert(splitRows);
+      if (se) throw se;
+      return exp;
+    }
+
+    async function removeExpense(expenseId) {
+      const { error } = await db.from('expenses').delete().eq('id', expenseId);
+      if (error) throw error;
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🎨  FORMATTING HELPERS
+    // ══════════════════════════════════════════════════
+    const fmt = (amount, currency) => {
+      try {
+        return new Intl.NumberFormat('en-US', {
+          style: 'currency', currency,
+          minimumFractionDigits: 2, maximumFractionDigits: 2,
+        }).format(amount);
+      } catch { return `${currency} ${amount.toFixed(2)}`; }
+    };
+
+    const fmtDate = (d) =>
+      new Date(d + 'T12:00:00').toLocaleDateString('en-GB', {
+        day: 'numeric', month: 'short', year: 'numeric',
+      });
+
+    const fmtDateGroup = (d) =>
+      new Date(d + 'T12:00:00').toLocaleDateString('en-GB', {
+        weekday: 'long', day: 'numeric', month: 'long',
+      });
+
+    const todayISO = () => new Date().toISOString().split('T')[0];
+
+    const PALETTE = [
+      '#C8964C','#3D8B5E','#4A7FB5','#A0522D','#7B68EE',
+      '#C0392B','#2980B9','#16A085','#8E44AD','#D4AC0D',
+      '#E67E22','#1ABC9C',
+    ];
+
+    function memberColor(idx) { return PALETTE[idx % PALETTE.length]; }
+
+    function Avatar({ name = '?', idx = 0, size = 'md', className = '' }) {
+      const initials = name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
+      const sz = size === 'sm' ? 'w-7 h-7 text-xs' : size === 'lg' ? 'w-11 h-11 text-sm' : 'w-9 h-9 text-xs';
+      return (
+        <div
+          className={`${sz} rounded-full flex items-center justify-center text-white font-semibold flex-shrink-0 ${className}`}
+          style={{ background: memberColor(idx) }}
+        >
+          {initials}
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🧩  SHARED UI COMPONENTS
+    // ══════════════════════════════════════════════════
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+
+    function Spinner({ dark }) {
+      return <div className={`spinner ${dark ? 'spinner-dark' : ''}`} />;
+    }
+
+    function Btn({ children, variant = 'primary', loading, disabled, full, sm, className = '', ...props }) {
+      const base = `inline-flex items-center justify-center gap-2 font-semibold tracking-tight transition-all rounded-xl disabled:opacity-50 disabled:cursor-not-allowed`;
+      const size = sm ? 'px-3 py-1.5 text-xs' : 'px-4 py-2.5 text-sm';
+      const vars = {
+        primary:   'bg-ink text-cream hover:bg-ink/85 active:scale-[0.98]',
+        gold:      'bg-gold text-white hover:bg-gold-dark active:scale-[0.98] shadow-sm',
+        ghost:     'bg-parchment text-ink hover:bg-ink/10 active:scale-[0.98]',
+        danger:    'bg-rose-light text-rose hover:bg-rose/20 active:scale-[0.98]',
+        outline:   'border border-ink/20 text-ink hover:bg-ink/5 active:scale-[0.98]',
+      };
+      return (
+        <button
+          className={`${base} ${size} ${vars[variant]} ${full ? 'w-full' : ''} ${className}`}
+          disabled={loading || disabled}
+          {...props}
+        >
+          {loading ? <Spinner /> : children}
+        </button>
+      );
+    }
+
+    function Field({ label, hint, children }) {
+      return (
+        <div>
+          {label && <label className="block text-xs font-semibold text-muted uppercase tracking-widest mb-1.5">{label}</label>}
+          {children}
+          {hint && <p className="text-xs text-muted mt-1">{hint}</p>}
+        </div>
+      );
+    }
+
+    const inputCls = 'w-full px-3 py-2.5 bg-white border border-ink/12 rounded-xl text-sm text-ink placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-gold/40 focus:border-gold/50 transition';
+
+    function TextInput({ label, hint, ...props }) {
+      return (
+        <Field label={label} hint={hint}>
+          <input className={inputCls} {...props} />
+        </Field>
+      );
+    }
+
+    function SelectInput({ label, hint, children, ...props }) {
+      return (
+        <Field label={label} hint={hint}>
+          <select className={inputCls + ' cursor-pointer'} {...props}>
+            {children}
+          </select>
+        </Field>
+      );
+    }
+
+    function Modal({ title, onClose, children, wide }) {
+      // Prevent body scroll
+      useEffect(() => {
+        document.body.style.overflow = 'hidden';
+        return () => { document.body.style.overflow = ''; };
+      }, []);
+
+      return (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center modal-bg"
+          onClick={e => e.target === e.currentTarget && onClose()}
+        >
+          <div className={`bg-cream rounded-t-3xl sm:rounded-3xl w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-md'} max-h-[92vh] overflow-y-auto slide-up`}>
+            <div className="sticky top-0 bg-cream z-10 flex items-center justify-between px-5 pt-5 pb-4 border-b border-ink/8">
+              <h2 className="text-base font-bold text-ink">{title}</h2>
+              <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-ink/8 transition text-muted">
+                <i className="fa-solid fa-xmark text-sm" />
+              </button>
+            </div>
+            <div className="p-5">{children}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function Toast({ message, type = 'error' }) {
+      const bg = type === 'error' ? 'bg-rose-light text-rose border-rose/20' : 'bg-moss-light text-moss border-moss/20';
+      return (
+        <div className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-sm ${bg}`}>
+          <i className={`fa-solid ${type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-check'} flex-shrink-0`} />
+          {message}
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🏠  APP ROOT
+    // ══════════════════════════════════════════════════
+    function App() {
+      const [user, setUser] = useState(null);
+      const [profile, setProfile] = useState(null);
+      const [booting, setBooting] = useState(true);
+      const [selectedTrip, setSelectedTrip] = useState(null);
+
+      const onSignIn = useCallback(async (u) => {
+        setUser(u);
+        await claimMemberships();
+        const p = await fetchProfile(u.id);
+        setProfile(p);
+      }, []);
+
+      useEffect(() => {
+        db.auth.getSession().then(async ({ data: { session } }) => {
+          if (session?.user) await onSignIn(session.user);
+          setBooting(false);
+        });
+
+        const { data: { subscription } } = db.auth.onAuthStateChange(async (event, session) => {
+          if (event === 'SIGNED_IN' && session?.user) await onSignIn(session.user);
+          if (event === 'SIGNED_OUT') {
+            setUser(null); setProfile(null); setSelectedTrip(null);
+          }
+        });
+        return () => subscription.unsubscribe();
+      }, [onSignIn]);
+
+      if (booting) return (
+        <div className="min-h-screen flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-10 h-10 rounded-2xl bg-ink flex items-center justify-center mx-auto mb-4">
+              <i className="fa-solid fa-receipt text-cream" />
+            </div>
+            <Spinner dark />
+          </div>
+        </div>
+      );
+
+      if (!user) return <AuthView onAuth={onSignIn} />;
+      if (selectedTrip) return (
+        <TripView
+          trip={selectedTrip}
+          user={user}
+          profile={profile}
+          onBack={() => setSelectedTrip(null)}
+        />
+      );
+      return <TripsView user={user} profile={profile} onSelectTrip={setSelectedTrip} />;
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🔐  AUTH VIEW
+    // ══════════════════════════════════════════════════
+    function AuthView({ onAuth }) {
+      const [mode, setMode]     = useState('login');
+      const [name, setName]     = useState('');
+      const [email, setEmail]   = useState('');
+      const [pass, setPass]     = useState('');
+      const [err, setErr]       = useState('');
+      const [ok, setOk]         = useState('');
+      const [loading, setLoad]  = useState(false);
+
+      const submit = async () => {
+        setErr(''); setOk(''); setLoad(true);
+        try {
+          if (mode === 'register') {
+            if (!name.trim()) throw new Error('Please enter your name.');
+            const { error } = await db.auth.signUp({
+              email, password: pass,
+              options: { data: { name: name.trim() } },
+            });
+            if (error) throw error;
+            setOk('Account created! Check your email to confirm it, then sign in.');
+          } else {
+            const { data, error } = await db.auth.signInWithPassword({ email, password: pass });
+            if (error) throw error;
+            onAuth(data.user);
+          }
+        } catch (e) { setErr(e.message || 'Something went wrong.'); }
+        setLoad(false);
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center p-4 bg-cream">
+          <div className="w-full max-w-sm fade-up">
+            {/* Brand */}
+            <div className="text-center mb-8">
+              <div className="w-14 h-14 bg-ink rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                <i className="fa-solid fa-receipt text-gold text-xl" />
+              </div>
+              <h1 className="text-2xl font-bold text-ink tracking-tight">SplitTrip</h1>
+              <p className="text-sm text-muted mt-1">Shared expenses, simplified.</p>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-ink/8 p-6 shadow-sm">
+              {/* Toggle */}
+              <div className="flex gap-1 bg-parchment rounded-xl p-1 mb-5">
+                {[['login','Sign In'],['register','Create Account']].map(([m, label]) => (
+                  <button key={m} onClick={() => { setMode(m); setErr(''); setOk(''); }}
+                    className={`flex-1 py-2 rounded-lg text-xs font-semibold tracking-tight transition-all ${mode === m ? 'bg-white shadow-sm text-ink' : 'text-muted'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-3">
+                {mode === 'register' && (
+                  <TextInput label="Your name" type="text" placeholder="Sarah Smith" value={name} onChange={e => setName(e.target.value)} />
+                )}
+                <TextInput label="Email" type="email" placeholder="you@email.com" value={email} onChange={e => setEmail(e.target.value)} />
+                <TextInput label="Password" type="password" placeholder={mode === 'register' ? 'Min. 6 characters' : '••••••••'}
+                  value={pass} onChange={e => setPass(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && submit()} />
+              </div>
+
+              {err && <div className="mt-3"><Toast message={err} /></div>}
+              {ok  && <div className="mt-3"><Toast message={ok} type="success" /></div>}
+
+              <Btn variant="gold" full loading={loading} className="mt-4" onClick={submit}>
+                {mode === 'login' ? 'Sign In' : 'Create Account'}
+              </Btn>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🗺️  TRIPS LIST
+    // ══════════════════════════════════════════════════
+    function TripsView({ user, profile, onSelectTrip }) {
+      const [trips, setTrips]       = useState([]);
+      const [loading, setLoading]   = useState(true);
+      const [showCreate, setCreate] = useState(false);
+
+      const load = useCallback(async () => {
+        setLoading(true);
+        setTrips(await fetchTrips());
+        setLoading(false);
+      }, []);
+
+      useEffect(() => { load(); }, [load]);
+
+      return (
+        <div className="min-h-screen bg-cream">
+          {/* Header */}
+          <div className="bg-ink text-cream sticky top-0 z-20">
+            <div className="max-w-lg mx-auto px-4 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 bg-gold rounded-lg flex items-center justify-center">
+                  <i className="fa-solid fa-receipt text-white text-sm" />
+                </div>
+                <span className="font-bold tracking-tight">SplitTrip</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-cream/50 hidden sm:block">{profile?.name || user.email}</span>
+                <button onClick={() => db.auth.signOut()}
+                  className="text-cream/50 hover:text-cream transition text-sm" title="Sign out">
+                  <i className="fa-solid fa-arrow-right-from-bracket" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="max-w-lg mx-auto px-4 py-6">
+            <div className="flex items-start justify-between mb-5">
+              <div>
+                <h2 className="text-xl font-bold text-ink">Your Trips</h2>
+                <p className="text-sm text-muted">Select one or create a new trip</p>
+              </div>
+              <Btn variant="gold" onClick={() => setCreate(true)} sm>
+                <i className="fa-solid fa-plus" /> New Trip
+              </Btn>
+            </div>
+
+            {loading ? (
+              <div className="flex justify-center py-16"><Spinner dark /></div>
+            ) : trips.length === 0 ? (
+              <div className="text-center py-16 bg-white rounded-2xl border border-ink/8 fade-up">
+                <div className="w-14 h-14 bg-parchment rounded-2xl flex items-center justify-center mx-auto mb-3">
+                  <i className="fa-solid fa-plane text-gold text-xl" />
+                </div>
+                <p className="font-semibold text-ink">No trips yet</p>
+                <p className="text-sm text-muted mt-1 mb-4">Create your first shared trip</p>
+                <Btn variant="gold" onClick={() => setCreate(true)}>
+                  <i className="fa-solid fa-plus" /> Create a Trip
+                </Btn>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {trips.map((trip, i) => (
+                  <TripCard key={trip.id} trip={trip} idx={i} onClick={() => onSelectTrip(trip)} />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {showCreate && (
+            <CreateTripModal
+              user={user} profile={profile}
+              onCreated={trip => { setCreate(false); load(); onSelectTrip(trip); }}
+              onClose={() => setCreate(false)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    function TripCard({ trip, idx, onClick }) {
+      const members = trip.trip_members || [];
+      return (
+        <button onClick={onClick}
+          className="w-full bg-white rounded-2xl border border-ink/8 p-4 text-left hover:border-gold/40 hover:shadow-md transition-all active:scale-[0.99] fade-up">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+              style={{ background: memberColor(idx), opacity: 0.85 }}>
+              <i className="fa-solid fa-plane text-white text-sm" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <h3 className="font-semibold text-ink truncate">{trip.name}</h3>
+                <span className="text-xs font-semibold text-gold bg-gold-light px-2 py-0.5 rounded-full flex-shrink-0">
+                  {trip.base_currency}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 mt-2">
+                <div className="flex -space-x-2">
+                  {members.slice(0, 5).map((m, i) => (
+                    <Avatar key={m.id} name={m.name} idx={i} size="sm" className="border-2 border-white" />
+                  ))}
+                  {members.length > 5 && (
+                    <div className="w-7 h-7 bg-parchment border-2 border-white rounded-full flex items-center justify-center text-xs text-muted font-semibold">
+                      +{members.length - 5}
+                    </div>
+                  )}
+                </div>
+                <span className="text-xs text-muted">{members.length} {members.length === 1 ? 'person' : 'people'}</span>
+              </div>
+            </div>
+            <i className="fa-solid fa-chevron-right text-muted text-xs mt-1" />
+          </div>
+        </button>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // ✨  CREATE TRIP MODAL
+    // ══════════════════════════════════════════════════
+    function CreateTripModal({ user, profile, onCreated, onClose }) {
+      const [name, setName]     = useState('');
+      const [desc, setDesc]     = useState('');
+      const [curr, setCurr]     = useState('EUR');
+      const [members, setMems]  = useState([
+        { key: 0, name: profile?.name || 'Me', email: user.email, userId: user.id, isYou: true },
+      ]);
+      const [newName, setNName] = useState('');
+      const [newEmail, setNEml] = useState('');
+      const [err, setErr]       = useState('');
+      const [loading, setLoad]  = useState(false);
+      const nextKey = useRef(1);
+
+      const addLocal = () => {
+        if (!newName.trim()) return;
+        setMems(p => [...p, { key: nextKey.current++, name: newName.trim(), email: newEmail.trim() || null, userId: null, isYou: false }]);
+        setNName(''); setNEml('');
+      };
+
+      const submit = async () => {
+        if (!name.trim()) { setErr('Please enter a trip name.'); return; }
+        if (members.length < 2) { setErr('Add at least 2 people.'); return; }
+        setErr(''); setLoad(true);
+        try {
+          const trip = await createTrip(name.trim(), desc.trim(), curr, user.id, members);
+          onCreated(trip);
+        } catch (e) { setErr(e.message || 'Failed to create trip.'); setLoad(false); }
+      };
+
+      return (
+        <Modal title="Create New Trip" onClose={onClose} wide>
+          <div className="space-y-4">
+            <TextInput label="Trip name *" placeholder="Italy 2025, Japan Trip, Vegas Weekend…" value={name} onChange={e => setName(e.target.value)} />
+            <TextInput label="Description" placeholder="Optional note about the trip" value={desc} onChange={e => setDesc(e.target.value)} />
+            <SelectInput label="Settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
+              {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+            </SelectInput>
+
+            {/* Members */}
+            <Field label={`People on this trip (${members.length})`}
+              hint="Add email so they can log in and find this trip automatically.">
+              <div className="space-y-2 mb-2">
+                {members.map((m, i) => (
+                  <div key={m.key} className="flex items-center gap-2 bg-parchment rounded-xl px-3 py-2.5">
+                    <Avatar name={m.name} idx={i} size="sm" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-ink truncate">{m.name}</p>
+                      {m.email && <p className="text-xs text-muted truncate">{m.email}</p>}
+                    </div>
+                    {m.isYou
+                      ? <span className="text-xs font-semibold text-gold">You</span>
+                      : <button onClick={() => setMems(p => p.filter(x => x.key !== m.key))}
+                          className="text-muted hover:text-rose transition text-xs">
+                          <i className="fa-solid fa-times" />
+                        </button>
+                    }
+                  </div>
+                ))}
+              </div>
+              <div className="bg-parchment rounded-xl p-3">
+                <p className="text-xs font-semibold text-muted uppercase tracking-widest mb-2">Add a person</p>
+                <div className="flex gap-2">
+                  <input value={newName} onChange={e => setNName(e.target.value)} placeholder="Name *"
+                    onKeyDown={e => e.key === 'Enter' && addLocal()}
+                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                  <input value={newEmail} onChange={e => setNEml(e.target.value)} placeholder="Email (optional)"
+                    onKeyDown={e => e.key === 'Enter' && addLocal()}
+                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                  <button onClick={addLocal}
+                    className="bg-gold text-white px-3 py-2 rounded-lg text-sm hover:bg-gold-dark transition">
+                    <i className="fa-solid fa-plus" />
+                  </button>
+                </div>
+              </div>
+            </Field>
+
+            {err && <Toast message={err} />}
+
+            <div className="flex gap-2 pt-1">
+              <Btn variant="outline" full onClick={onClose}>Cancel</Btn>
+              <Btn variant="gold" full loading={loading} onClick={submit}>Create Trip</Btn>
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 📋  TRIP VIEW  (tabs wrapper)
+    // ══════════════════════════════════════════════════
+    function TripView({ trip, user, profile, onBack }) {
+      const [tab, setTab]           = useState('expenses');
+      const [members, setMembers]   = useState([]);
+      const [expenses, setExpenses] = useState([]);
+      const [loading, setLoading]   = useState(true);
+
+      const load = useCallback(async () => {
+        setLoading(true);
+        const [m, e] = await Promise.all([
+          fetchTripMembers(trip.id),
+          fetchExpenses(trip.id),
+        ]);
+        setMembers(m);
+        setExpenses(e);
+        setLoading(false);
+      }, [trip.id]);
+
+      useEffect(() => { load(); }, [load]);
+
+      const TABS = [
+        { key: 'expenses',    icon: 'fa-receipt',        label: 'Expenses' },
+        { key: 'settlements', icon: 'fa-scale-balanced', label: 'Settle Up' },
+        { key: 'people',      icon: 'fa-users',          label: 'People' },
+      ];
+
+      return (
+        <div className="min-h-screen bg-cream flex flex-col">
+          {/* Header */}
+          <div className="bg-ink text-cream sticky top-0 z-20">
+            <div className="max-w-lg mx-auto px-4">
+              <div className="flex items-center gap-3 pt-4 pb-3">
+                <button onClick={onBack}
+                  className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-cream/10 transition text-cream/70 hover:text-cream -ml-1">
+                  <i className="fa-solid fa-arrow-left text-sm" />
+                </button>
+                <div className="flex-1 min-w-0">
+                  <h1 className="font-bold truncate tracking-tight">{trip.name}</h1>
+                  <p className="text-xs text-cream/40 mt-0.5">{members.length} people · {trip.base_currency}</p>
+                </div>
+              </div>
+              <div className="flex gap-1 -mb-px">
+                {TABS.map(t => (
+                  <button key={t.key} onClick={() => setTab(t.key)}
+                    className={`flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold tracking-tight border-b-2 transition-all ${
+                      tab === t.key ? 'text-gold border-gold' : 'text-cream/40 border-transparent hover:text-cream/70'
+                    }`}>
+                    <i className={`fa-solid ${t.icon} text-xs`} />
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Content */}
+          <div className="flex-1 max-w-lg mx-auto w-full px-4 py-5">
+            {loading ? (
+              <div className="flex justify-center pt-16"><Spinner dark /></div>
+            ) : (
+              <>
+                {tab === 'expenses'    && <ExpensesTab    trip={trip} members={members} expenses={expenses} user={user} onRefresh={load} />}
+                {tab === 'settlements' && <SettlementsTab trip={trip} members={members} expenses={expenses} />}
+                {tab === 'people'      && <PeopleTab      trip={trip} members={members} user={user} onRefresh={load} />}
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 💸  EXPENSES TAB
+    // ══════════════════════════════════════════════════
+    function ExpensesTab({ trip, members, expenses, user, onRefresh }) {
+      const [showAdd, setAdd]  = useState(false);
+      const [deleting, setDel] = useState(null);
+
+      const memberIdx  = (id) => members.findIndex(m => m.id === id);
+      const memberName = (id) => members.find(m => m.id === id)?.name || 'Unknown';
+
+      const handleDelete = async (id) => {
+        if (!window.confirm('Delete this expense? This cannot be undone.')) return;
+        setDel(id);
+        try { await removeExpense(id); await onRefresh(); }
+        catch (e) { alert('Delete failed: ' + e.message); }
+        setDel(null);
+      };
+
+      // Group by date
+      const grouped = useMemo(() => {
+        const g = {};
+        expenses.forEach(e => {
+          if (!g[e.date]) g[e.date] = [];
+          g[e.date].push(e);
+        });
+        return Object.entries(g).sort(([a], [b]) => b.localeCompare(a));
+      }, [expenses]);
+
+      // Total spend shown in header
+      const totals = useMemo(() => {
+        const t = {};
+        expenses.forEach(e => { t[e.currency] = (t[e.currency] || 0) + e.amount; });
+        return t;
+      }, [expenses]);
+
+      return (
+        <div className="pb-24">
+          {/* Summary pill */}
+          {expenses.length > 0 && (
+            <div className="flex flex-wrap gap-2 mb-4">
+              {Object.entries(totals).map(([c, amt]) => (
+                <div key={c} className="bg-white rounded-full border border-ink/8 px-3 py-1.5 text-xs font-semibold text-ink">
+                  {fmt(amt, c)} total
+                </div>
+              ))}
+              <div className="bg-white rounded-full border border-ink/8 px-3 py-1.5 text-xs font-semibold text-muted">
+                {expenses.length} {expenses.length === 1 ? 'expense' : 'expenses'}
+              </div>
+            </div>
+          )}
+
+          {grouped.length === 0 ? (
+            <div className="text-center py-14 bg-white rounded-2xl border border-ink/8">
+              <i className="fa-solid fa-receipt text-3xl text-gold/40 mb-3" />
+              <p className="font-semibold text-ink">No expenses yet</p>
+              <p className="text-sm text-muted mt-1">Tap below to add the first one</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {grouped.map(([date, dayExps]) => (
+                <div key={date}>
+                  <p className="text-xs font-semibold text-muted uppercase tracking-widest mb-2 px-1">
+                    {fmtDateGroup(date)}
+                  </p>
+                  <div className="space-y-2">
+                    {dayExps.map(exp => (
+                      <ExpenseCard key={exp.id} expense={exp}
+                        memberName={memberName} memberIdx={memberIdx}
+                        onDelete={() => handleDelete(exp.id)}
+                        deleting={deleting === exp.id} />
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* FAB */}
+          <div className="fixed bottom-6 inset-x-0 flex justify-center z-20 pointer-events-none">
+            <button onClick={() => setAdd(true)}
+              className="pointer-events-auto flex items-center gap-2 bg-ink text-cream px-5 py-3.5 rounded-full shadow-xl hover:bg-ink/85 active:scale-95 transition-all font-semibold text-sm tracking-tight">
+              <i className="fa-solid fa-plus text-gold" />
+              Add Expense
+            </button>
+          </div>
+
+          {showAdd && (
+            <AddExpenseModal trip={trip} members={members} user={user}
+              onAdded={() => { setAdd(false); onRefresh(); }}
+              onClose={() => setAdd(false)} />
+          )}
+        </div>
+      );
+    }
+
+    function ExpenseCard({ expense, memberName, memberIdx, onDelete, deleting }) {
+      const [open, setOpen] = useState(false);
+      const payer = memberName(expense.paid_by_member_id);
+      const payerIdx = memberIdx(expense.paid_by_member_id);
+
+      return (
+        <div className="bg-white rounded-2xl border border-ink/8 overflow-hidden transition-all">
+          <button onClick={() => setOpen(!open)} className="w-full text-left p-4">
+            <div className="flex items-center gap-3">
+              <Avatar name={payer} idx={payerIdx} />
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-ink truncate text-sm">{expense.description}</p>
+                <p className="text-xs text-muted mt-0.5">{payer} paid · {fmtDate(expense.date)}</p>
+              </div>
+              <div className="text-right">
+                <p className="font-bold text-ink">{fmt(expense.amount, expense.currency)}</p>
+                <p className="text-xs text-muted">{expense.currency}</p>
+              </div>
+              <i className={`fa-solid fa-chevron-down text-muted text-xs transition-transform ${open ? 'rotate-180' : ''}`} />
+            </div>
+          </button>
+
+          {open && (
+            <div className="border-t border-parchment px-4 pb-4">
+              <p className="text-xs font-semibold text-muted uppercase tracking-widest mt-3 mb-2.5">Split</p>
+              <div className="space-y-2">
+                {(expense.expense_splits || []).map(split => (
+                  <div key={split.id} className="flex items-center gap-2.5">
+                    <Avatar name={memberName(split.member_id)} idx={memberIdx(split.member_id)} size="sm" />
+                    <span className="text-sm text-ink flex-1">{memberName(split.member_id)}</span>
+                    <span className="text-sm font-semibold text-ink">{fmt(split.amount, expense.currency)}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 pt-3 border-t border-parchment flex justify-end">
+                <button onClick={onDelete} disabled={deleting}
+                  className="flex items-center gap-1.5 text-xs text-rose hover:text-rose/70 transition disabled:opacity-50">
+                  {deleting ? <Spinner /> : <i className="fa-solid fa-trash-can" />}
+                  Delete expense
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // ➕  ADD EXPENSE MODAL
+    // ══════════════════════════════════════════════════
+    function AddExpenseModal({ trip, members, user, onAdded, onClose }) {
+      const [desc, setDesc]       = useState('');
+      const [amount, setAmt]      = useState('');
+      const [currency, setCurr]   = useState(trip.base_currency);
+      const [date, setDate]       = useState(todayISO());
+      const [paidBy, setPaid]     = useState(members[0]?.id || '');
+      const [splitType, setSplit] = useState('equal');
+      const [equalSet, setEqSet]  = useState(() => new Set(members.map(m => m.id)));
+      const [percents, setPercs]  = useState(() => Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(1)])));
+      const [exacts, setExacts]   = useState(() => Object.fromEntries(members.map(m => [m.id, ''])));
+      const [single, setSingle]   = useState(members[1]?.id || members[0]?.id || '');
+      const [err, setErr]         = useState('');
+      const [loading, setLoad]    = useState(false);
+
+      const total = parseFloat(amount) || 0;
+      const pctTotal = Object.values(percents).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+      const exTotal  = Object.values(exacts).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+
+      const buildSplits = () => {
+        if (splitType === 'equal') {
+          const inc = members.filter(m => equalSet.has(m.id));
+          if (!inc.length) return null;
+          const share = total / inc.length;
+          return inc.map(m => ({ memberId: m.id, amount: Math.round(share * 100) / 100 }));
+        }
+        if (splitType === 'percent') {
+          if (Math.abs(pctTotal - 100) > 0.5) return null;
+          return members
+            .map(m => ({ memberId: m.id, amount: Math.round(total * (parseFloat(percents[m.id]) || 0) / 100 * 100) / 100 }))
+            .filter(s => s.amount > 0);
+        }
+        if (splitType === 'exact') {
+          if (Math.abs(exTotal - total) > 0.02) return null;
+          return members
+            .map(m => ({ memberId: m.id, amount: Math.round((parseFloat(exacts[m.id]) || 0) * 100) / 100 }))
+            .filter(s => s.amount > 0);
+        }
+        if (splitType === 'single') {
+          return [{ memberId: single, amount: total }];
+        }
+      };
+
+      const submit = async () => {
+        setErr('');
+        if (!desc.trim())         { setErr('Please add a description.'); return; }
+        if (!total || total <= 0) { setErr('Enter a valid amount.'); return; }
+        const splits = buildSplits();
+        if (!splits) {
+          if (splitType === 'equal')   { setErr('Select at least one person.'); return; }
+          if (splitType === 'percent') { setErr(`Percentages must sum to 100% — currently ${pctTotal.toFixed(1)}%`); return; }
+          if (splitType === 'exact')   { setErr(`Amounts must sum to ${fmt(total, currency)} — currently ${fmt(exTotal, currency)}`); return; }
+        }
+        setLoad(true);
+        try {
+          await saveExpense(trip.id, {
+            paid_by_member_id: paidBy,
+            amount: total, currency, date,
+            description: desc.trim(),
+          }, splits, user.id);
+          onAdded();
+        } catch (e) { setErr(e.message || 'Failed to save expense.'); setLoad(false); }
+      };
+
+      const SPLIT_TABS = [
+        { key: 'equal',   label: 'Equal' },
+        { key: 'percent', label: '%' },
+        { key: 'exact',   label: 'Exact' },
+        { key: 'single',  label: '1 Person' },
+      ];
+
+      return (
+        <Modal title="Add Expense" onClose={onClose} wide>
+          <div className="space-y-4">
+            <TextInput label="Description *" placeholder="Dinner, train tickets, hotel deposit…" value={desc} onChange={e => setDesc(e.target.value)} />
+
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <TextInput label="Amount *" type="number" placeholder="0.00" min="0" step="0.01" value={amount} onChange={e => setAmt(e.target.value)} />
+              </div>
+              <div className="w-28">
+                <SelectInput label="Currency" value={currency} onChange={e => setCurr(e.target.value)}>
+                  {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+                </SelectInput>
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <TextInput label="Date" type="date" value={date} onChange={e => setDate(e.target.value)} />
+              </div>
+              <div className="flex-1">
+                <SelectInput label="Paid by" value={paidBy} onChange={e => setPaid(e.target.value)}>
+                  {members.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </SelectInput>
+              </div>
+            </div>
+
+            {/* Split type selector */}
+            <div>
+              <Field label="How to split">
+                <div className="flex gap-1 bg-parchment rounded-xl p-1">
+                  {SPLIT_TABS.map(st => (
+                    <button key={st.key} onClick={() => setSplit(st.key)}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all ${splitType === st.key ? 'bg-white shadow text-ink' : 'text-muted'}`}>
+                      {st.label}
+                    </button>
+                  ))}
+                </div>
+              </Field>
+
+              <div className="mt-3 bg-parchment rounded-2xl p-3">
+
+                {/* Equal */}
+                {splitType === 'equal' && (
+                  <div className="space-y-1">
+                    {members.map((m, i) => (
+                      <label key={m.id} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/50 cursor-pointer transition">
+                        <input type="checkbox" checked={equalSet.has(m.id)}
+                          onChange={e => {
+                            const s = new Set(equalSet);
+                            e.target.checked ? s.add(m.id) : s.delete(m.id);
+                            setEqSet(s);
+                          }} className="w-4 h-4" />
+                        <Avatar name={m.name} idx={i} size="sm" />
+                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
+                        {total > 0 && equalSet.has(m.id) && equalSet.size > 0 && (
+                          <span className="text-xs text-muted font-semibold">
+                            {fmt(total / equalSet.size, currency)}
+                          </span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                )}
+
+                {/* Percentage */}
+                {splitType === 'percent' && (
+                  <div className="space-y-2">
+                    <div className={`text-right text-xs font-bold ${Math.abs(pctTotal - 100) > 0.5 ? 'text-rose' : 'text-moss'}`}>
+                      {pctTotal.toFixed(1)}% / 100%
+                    </div>
+                    {members.map((m, i) => (
+                      <div key={m.id} className="flex items-center gap-2">
+                        <Avatar name={m.name} idx={i} size="sm" />
+                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
+                        <input type="number" value={percents[m.id]} min="0" max="100" step="1"
+                          onChange={e => setPercs(p => ({ ...p, [m.id]: e.target.value }))}
+                          className="w-16 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                        <span className="text-xs text-muted w-4">%</span>
+                        {total > 0 && (
+                          <span className="text-xs text-muted w-20 text-right font-semibold">
+                            {fmt(total * (parseFloat(percents[m.id]) || 0) / 100, currency)}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Exact */}
+                {splitType === 'exact' && (
+                  <div className="space-y-2">
+                    {total > 0 && (
+                      <div className={`text-right text-xs font-bold ${Math.abs(exTotal - total) > 0.02 ? 'text-rose' : 'text-moss'}`}>
+                        {fmt(exTotal, currency)} / {fmt(total, currency)}
+                        {Math.abs(exTotal - total) > 0.02 && ` · ${fmt(total - exTotal, currency)} left`}
+                      </div>
+                    )}
+                    {members.map((m, i) => (
+                      <div key={m.id} className="flex items-center gap-2">
+                        <Avatar name={m.name} idx={i} size="sm" />
+                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
+                        <input type="number" value={exacts[m.id]} min="0" step="0.01" placeholder="0.00"
+                          onChange={e => setExacts(p => ({ ...p, [m.id]: e.target.value }))}
+                          className="w-24 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Single person */}
+                {splitType === 'single' && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted mb-2">Who owes the entire amount?</p>
+                    {members.map((m, i) => (
+                      <label key={m.id}
+                        className={`flex items-center gap-3 p-2 rounded-xl cursor-pointer transition border ${single === m.id ? 'bg-white border-gold/40' : 'border-transparent hover:bg-white/50'}`}>
+                        <input type="radio" name="single" value={m.id} checked={single === m.id}
+                          onChange={() => setSingle(m.id)} className="w-4 h-4" />
+                        <Avatar name={m.name} idx={i} size="sm" />
+                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
+                        {single === m.id && total > 0 && (
+                          <span className="text-xs font-bold text-gold">{fmt(total, currency)}</span>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {err && <Toast message={err} />}
+
+            <div className="flex gap-2 pt-1">
+              <Btn variant="outline" full onClick={onClose}>Cancel</Btn>
+              <Btn variant="gold" full loading={loading} onClick={submit}>Save Expense</Btn>
+            </div>
+          </div>
+        </Modal>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // ⚖️  SETTLEMENTS TAB
+    // ══════════════════════════════════════════════════
+    function SettlementsTab({ trip, members, expenses }) {
+      const [currency, setCurr]       = useState(trip.base_currency);
+      const [result, setResult]       = useState(null);
+      const [calculating, setCalc]    = useState(false);
+
+      const memberName = (id) => members.find(m => m.id === id)?.name || 'Unknown';
+      const memberIdx  = (id) => members.findIndex(m => m.id === id);
+
+      const compute = useCallback(async () => {
+        if (!members.length) return;
+        setCalc(true);
+        const r = await computeSettlements(expenses, members, currency);
+        setResult(r);
+        setCalc(false);
+      }, [expenses, members, currency]);
+
+      useEffect(() => { compute(); }, [compute]);
+
+      return (
+        <div className="space-y-4 pb-8">
+          {/* Currency chooser */}
+          <div className="bg-white rounded-2xl border border-ink/8 p-4">
+            <div className="flex items-center gap-3">
+              <div>
+                <p className="text-xs font-semibold text-muted uppercase tracking-widest">Display currency</p>
+                <p className="text-xs text-muted mt-0.5">All amounts converted at historical rates</p>
+              </div>
+              <select value={currency} onChange={e => setCurr(e.target.value)}
+                className="ml-auto px-3 py-1.5 bg-parchment border border-ink/12 rounded-xl text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40">
+                {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {calculating ? (
+            <div className="text-center py-12">
+              <div className="mb-3"><Spinner dark /></div>
+              <p className="text-xs text-muted">Fetching exchange rates…</p>
+            </div>
+          ) : result ? (
+            <>
+              {/* Per-person balances */}
+              <div className="bg-white rounded-2xl border border-ink/8 overflow-hidden">
+                <div className="px-4 pt-4 pb-2">
+                  <p className="text-xs font-semibold text-muted uppercase tracking-widest">Balance per person</p>
+                </div>
+                {members.map((m, i) => {
+                  const bal = result.balances[m.id] ?? 0;
+                  const isPos = bal > 0.005, isNeg = bal < -0.005;
+                  return (
+                    <div key={m.id} className="flex items-center gap-3 px-4 py-3 border-t border-parchment first:border-0">
+                      <Avatar name={m.name} idx={i} size="sm" />
+                      <span className="text-sm font-medium text-ink flex-1">{m.name}</span>
+                      <div className="text-right">
+                        <span className={`text-sm font-bold ${isPos ? 'text-moss' : isNeg ? 'text-rose' : 'text-muted'}`}>
+                          {isPos ? '+' : ''}{fmt(bal, currency)}
+                        </span>
+                        <p className="text-xs text-muted mt-0.5">{isPos ? 'gets back' : isNeg ? 'owes' : 'settled'}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Transactions */}
+              <div>
+                <p className="text-xs font-semibold text-muted uppercase tracking-widest mb-2 px-1">Who pays whom</p>
+                {result.settlements.length === 0 ? (
+                  <div className="bg-white rounded-2xl border border-ink/8 p-6 text-center">
+                    <i className="fa-solid fa-circle-check text-3xl text-moss mb-2" />
+                    <p className="font-semibold text-ink">All settled up!</p>
+                    <p className="text-sm text-muted mt-1">No payments needed</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {result.settlements.map((txn, i) => (
+                      <div key={i} className="bg-white rounded-2xl border border-ink/8 p-4 flex items-center gap-3">
+                        <Avatar name={memberName(txn.from)} idx={memberIdx(txn.from)} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-ink">
+                            <span className="font-bold">{memberName(txn.from)}</span>
+                            <span className="text-muted"> → </span>
+                            <span className="font-bold">{memberName(txn.to)}</span>
+                          </p>
+                        </div>
+                        <p className="font-bold text-gold text-base flex-shrink-0">{fmt(txn.amount, currency)}</p>
+                        <Avatar name={memberName(txn.to)} idx={memberIdx(txn.to)} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {expenses.length > 0 && (
+                <p className="text-xs text-center text-muted/70 pb-1">
+                  <i className="fa-solid fa-circle-info mr-1" />
+                  Rates via <a href="https://frankfurter.app" target="_blank" rel="noreferrer" className="underline">frankfurter.app</a> · Date of each expense used
+                </p>
+              )}
+            </>
+          ) : null}
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 👥  PEOPLE TAB
+    // ══════════════════════════════════════════════════
+    function PeopleTab({ trip, members, user, onRefresh }) {
+      const [showForm, setForm]   = useState(false);
+      const [name, setName]       = useState('');
+      const [email, setEmail]     = useState('');
+      const [err, setErr]         = useState('');
+      const [loading, setLoad]    = useState(false);
+
+      const handleAdd = async () => {
+        if (!name.trim()) { setErr('Name required.'); return; }
+        setErr(''); setLoad(true);
+        try {
+          await addMemberToTrip(trip.id, name.trim(), email.trim() || null);
+          setName(''); setEmail(''); setForm(false);
+          await onRefresh();
+        } catch (e) { setErr(e.message || 'Failed to add.'); }
+        setLoad(false);
+      };
+
+      return (
+        <div className="space-y-4 pb-8">
+          <div className="bg-white rounded-2xl border border-ink/8 overflow-hidden">
+            <div className="flex items-center justify-between px-4 pt-4 pb-3">
+              <p className="font-semibold text-ink">{members.length} {members.length === 1 ? 'Person' : 'People'}</p>
+              <button onClick={() => setForm(!showForm)}
+                className="text-xs font-semibold text-gold hover:text-gold-dark transition flex items-center gap-1">
+                <i className="fa-solid fa-plus" /> Add person
+              </button>
+            </div>
+
+            {showForm && (
+              <div className="mx-4 mb-3 bg-parchment rounded-xl p-3 space-y-2">
+                <div className="flex gap-2">
+                  <input value={name} onChange={e => setName(e.target.value)} placeholder="Name *"
+                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                  <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email (optional)"
+                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                </div>
+                {err && <p className="text-xs text-rose">{err}</p>}
+                <div className="flex gap-2">
+                  <Btn variant="outline" sm full onClick={() => { setForm(false); setErr(''); }}>Cancel</Btn>
+                  <Btn variant="gold" sm full loading={loading} onClick={handleAdd}>Add</Btn>
+                </div>
+              </div>
+            )}
+
+            {members.map((m, i) => (
+              <div key={m.id} className="flex items-center gap-3 px-4 py-3 border-t border-parchment first:border-0">
+                <Avatar name={m.name} idx={i} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-ink truncate">{m.name}</p>
+                  {m.email && <p className="text-xs text-muted truncate">{m.email}</p>}
+                </div>
+                {m.user_id
+                  ? <span className="text-xs font-semibold text-moss bg-moss-light px-2 py-0.5 rounded-full">Active</span>
+                  : <span className="text-xs text-muted bg-parchment px-2 py-0.5 rounded-full">{m.email ? 'Invited' : 'Offline'}</span>
+                }
+                {m.user_id === user.id && <span className="text-xs font-bold text-gold">You</span>}
+              </div>
+            ))}
+          </div>
+
+          {/* Invite instructions */}
+          <div className="bg-gold-light border border-gold/20 rounded-2xl p-4">
+            <div className="flex gap-3">
+              <i className="fa-solid fa-envelope text-gold mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-ink">How to invite someone</p>
+                <p className="text-xs text-muted mt-1 leading-relaxed">
+                  Add their email above, then share this app's URL. When they sign up with that email, this trip will appear in their account automatically — no invite code needed.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // 🚀  RENDER
+    // ══════════════════════════════════════════════════
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
