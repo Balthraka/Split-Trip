@@ -97,8 +97,8 @@
     // ══════════════════════════════════════════════════
     // ⚙️  CONFIG  — paste your Supabase values here
     // ══════════════════════════════════════════════════
-    const SUPABASE_URL      = 'https://ijpdgjryrwkrirtvrcoj.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlqcGRnanJ5cndrcmlydHZyY29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0MDk5OTUsImV4cCI6MjA5Mzk4NTk5NX0.-ydS5bd_THbKKfdy8E4dzTAs7sZdKpytwIi1S0JLQ2E';
+    const SUPABASE_URL      = 'https://YOUR_PROJECT_ID.supabase.co';
+    const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 
     // ══════════════════════════════════════════════════
     // 🔌  SUPABASE CLIENT
@@ -500,7 +500,7 @@
             if (error) throw error;
             onAuth(data.user);
           }
-        } catch (e) { setErr(e.message || 'Something went wrong.'); }
+        } catch (e) { setErr(e?.message || 'Something went wrong.'); }
         setLoad(false);
       };
 
@@ -691,12 +691,16 @@
 
       const submit = async () => {
         if (!name.trim()) { setErr('Please enter a trip name.'); return; }
-        if (members.length < 2) { setErr('Add at least 2 people.'); return; }
+        // Auto-add person if they typed a name but forgot to press +
+        const finalMembers = newName.trim()
+          ? [...members, { key: nextKey.current++, name: newName.trim(), email: newEmail.trim() || null, userId: null, isYou: false }]
+          : members;
+        if (finalMembers.length < 2) { setErr('Add at least one other person.'); return; }
         setErr(''); setLoad(true);
         try {
-          const trip = await createTrip(name.trim(), desc.trim(), curr, user.id, members);
+          const trip = await createTrip(name.trim(), desc.trim(), curr, user.id, finalMembers);
           onCreated(trip);
-        } catch (e) { setErr(e.message || 'Failed to create trip.'); setLoad(false); }
+        } catch (e) { setLoad(false); setErr(e?.message || 'Failed to create trip.'); }
       };
 
       return (
@@ -844,7 +848,7 @@
         if (!window.confirm('Delete this expense? This cannot be undone.')) return;
         setDel(id);
         try { await removeExpense(id); await onRefresh(); }
-        catch (e) { alert('Delete failed: ' + e.message); }
+        catch (e) { alert('Delete failed: ' + (e?.message || 'Unknown error')); }
         setDel(null);
       };
 
@@ -1035,7 +1039,7 @@
             description: desc.trim(),
           }, splits, user.id);
           onAdded();
-        } catch (e) { setErr(e.message || 'Failed to save expense.'); setLoad(false); }
+        } catch (e) { setLoad(false); setErr(e?.message || 'Failed to save expense.'); }
       };
 
       const SPLIT_TABS = [
@@ -1312,7 +1316,7 @@
           await addMemberToTrip(trip.id, name.trim(), email.trim() || null);
           setName(''); setEmail(''); setForm(false);
           await onRefresh();
-        } catch (e) { setErr(e.message || 'Failed to add.'); }
+        } catch (e) { setErr(e?.message || 'Failed to add.'); }
         setLoad(false);
       };
 
