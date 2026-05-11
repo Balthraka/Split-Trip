@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <title>SplitTrip</title>
 
@@ -90,7 +93,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.38.4/dist/umd/supabase.js"></script>
 
   <script type="text/babel" data-presets="react">
 
@@ -99,7 +102,7 @@
     // ══════════════════════════════════════════════════
     const SUPABASE_URL      = 'https://ijpdgjryrwkrirtvrcoj.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlqcGRnanJ5cndrcmlydHZyY29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0MDk5OTUsImV4cCI6MjA5Mzk4NTk5NX0.-ydS5bd_THbKKfdy8E4dzTAs7sZdKpytwIi1S0JLQ2E';
-
+    
     // ══════════════════════════════════════════════════
     // 🔌  SUPABASE CLIENT
     // ══════════════════════════════════════════════════
@@ -568,14 +571,17 @@
     function TripsView({ user, profile, onSelectTrip }) {
       const [trips, setTrips]       = useState([]);
       const [loading, setLoading]   = useState(true);
+      const [loadError, setLoadError] = useState('');
       const [showCreate, setCreate] = useState(false);
 
       const load = useCallback(async () => {
         setLoading(true);
+        setLoadError('');
         try {
           setTrips(await fetchTrips());
         } catch (e) {
           console.error('Failed to load trips:', e);
+          setLoadError(e?.message || 'Could not connect to database.');
         } finally {
           setLoading(false);
         }
@@ -596,7 +602,10 @@
               </div>
               <div className="flex items-center gap-3">
                 <span className="text-xs text-cream/50 hidden sm:block">{profile?.name || user.email}</span>
-                <button onClick={() => db.auth.signOut()}
+                <button onClick={async () => {
+                    await db.auth.signOut();
+                    window.location.reload();
+                  }}
                   className="text-cream/50 hover:text-cream transition text-sm" title="Sign out">
                   <i className="fa-solid fa-arrow-right-from-bracket" />
                 </button>
@@ -617,6 +626,13 @@
 
             {loading ? (
               <div className="flex justify-center py-16"><Spinner dark /></div>
+            ) : loadError ? (
+              <div className="text-center py-14 bg-white rounded-2xl border border-rose/20 fade-up">
+                <i className="fa-solid fa-triangle-exclamation text-2xl text-rose mb-3" />
+                <p className="font-semibold text-ink">Connection error</p>
+                <p className="text-sm text-muted mt-1 mb-4 px-4">{loadError}</p>
+                <Btn variant="ghost" onClick={load}>Try again</Btn>
+              </div>
             ) : trips.length === 0 ? (
               <div className="text-center py-16 bg-white rounded-2xl border border-ink/8 fade-up">
                 <div className="w-14 h-14 bg-parchment rounded-2xl flex items-center justify-center mx-auto mb-3">
@@ -787,9 +803,11 @@
       const [members, setMembers]   = useState([]);
       const [expenses, setExpenses] = useState([]);
       const [loading, setLoading]   = useState(true);
+      const [loadError, setLoadError] = useState('');
 
       const load = useCallback(async () => {
         setLoading(true);
+        setLoadError('');
         try {
           const [m, e] = await Promise.all([
             fetchTripMembers(trip.id),
@@ -799,6 +817,7 @@
           setExpenses(e);
         } catch (e) {
           console.error('Failed to load trip data:', e);
+          setLoadError(e?.message || 'Could not load trip data.');
         } finally {
           setLoading(false);
         }
@@ -845,6 +864,13 @@
           <div className="flex-1 max-w-lg mx-auto w-full px-4 py-5">
             {loading ? (
               <div className="flex justify-center pt-16"><Spinner dark /></div>
+            ) : loadError ? (
+              <div className="text-center py-14 bg-white rounded-2xl border border-rose/20 mt-4 fade-up">
+                <i className="fa-solid fa-triangle-exclamation text-2xl text-rose mb-3" />
+                <p className="font-semibold text-ink">Connection error</p>
+                <p className="text-sm text-muted mt-1 mb-4 px-4">{loadError}</p>
+                <Btn variant="ghost" onClick={load}>Try again</Btn>
+              </div>
             ) : (
               <>
                 {tab === 'expenses'    && <ExpensesTab    trip={trip} members={members} expenses={expenses} user={user} onRefresh={load} />}
