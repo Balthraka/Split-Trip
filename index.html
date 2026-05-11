@@ -324,7 +324,7 @@
       if (error) throw error;
     }
 
-    async function editExpense(expenseId, expenseData, splits) {
+    async function updateExpenseRecord(expenseId, expenseData, splits) {
       const { error } = await db.from('expenses').update(expenseData).eq('id', expenseId);
       if (error) throw error;
       const { error: de } = await db.from('expense_splits').delete().eq('expense_id', expenseId);
@@ -1356,8 +1356,18 @@
     // ══════════════════════════════════════════════════
     function AddExpenseModal({ trip, members, user, editExpense, onAdded, onClose }) {
       const isEdit = !!editExpense;
+
+      // ── Amount formatting helpers ──
+      const fmtAmt = (str) => {
+        const clean = String(str).replace(/[^0-9.]/g, '');
+        const [int, dec] = clean.split('.');
+        const intFmt = (int || '').replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        return dec !== undefined ? `${intFmt}.${dec}` : intFmt;
+      };
+      const parseAmt = (str) => parseFloat(String(str).replace(/,/g, '')) || 0;
+
       const [desc, setDesc]       = useState(editExpense?.description || '');
-      const [amount, setAmt]      = useState(editExpense ? String(editExpense.amount) : '');
+      const [amount, setAmt]      = useState(editExpense ? fmtAmt(editExpense.amount) : '');
       const [currency, setCurr]   = useState(editExpense?.currency || trip.expense_currency || trip.base_currency);
       const [date, setDate]       = useState(editExpense?.date || todayISO());
       const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
@@ -1376,9 +1386,45 @@
       const [err, setErr]         = useState('');
       const [loading, setLoad]    = useState(false);
 
-      const total = parseFloat(amount) || 0;
+      const total    = parseAmt(amount);
       const pctTotal = Object.values(percents).reduce((s, v) => s + (parseFloat(v) || 0), 0);
-      const exTotal  = Object.values(exacts).reduce((s, v) => s + (parseFloat(v) || 0), 0);
+      const exTotal  = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
+
+      // Fix 3: in exact mode, keep total in sync with sum of splits
+      useEffect(() => {
+        if (splitType === 'exact') {
+          const sum = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
+          if (sum > 0) setAmt(fmtAmt(sum.toFixed(2)));
+        }
+      }, [exacts, splitType]);
+
+      // Fix 2: auto-distribute remaining % DOWNWARD only
+      // People above the changed field are never touched
+      const handlePercentChange = (memberId, newVal) => {
+        const idx = members.findIndex(m => m.id === memberId);
+        const newPercs = { ...percents, [memberId]: newVal };
+
+        // Sum of everyone above (fixed — don't touch them)
+        const sumAbove = members.slice(0, idx).reduce(
+          (s, m) => s + (parseFloat(percents[m.id]) || 0), 0
+        );
+        const remaining = Math.max(0, 100 - sumAbove - (parseFloat(newVal) || 0));
+        const below = members.slice(idx + 1);
+
+        if (below.length > 0) {
+          const perBelow = remaining / below.length;
+          below.forEach((m, i) => {
+            const isLast = i === below.length - 1;
+            const soFar  = below.slice(0, i).reduce(
+              (s, om) => s + (parseFloat(newPercs[om.id]) || 0), 0
+            );
+            newPercs[m.id] = String(
+              Math.round((isLast ? remaining - soFar : perBelow) * 10) / 10
+            );
+          });
+        }
+        setPercs(newPercs);
+      };
 
       const buildSplits = () => {
         if (splitType === 'equal') {
@@ -1394,10 +1440,11 @@
             .filter(s => s.amount > 0);
         }
         if (splitType === 'exact') {
-          if (Math.abs(exTotal - total) > 0.02) return null;
-          return members
-            .map(m => ({ memberId: m.id, amount: Math.round((parseFloat(exacts[m.id]) || 0) * 100) / 100 }))
+          const rows = members
+            .map(m => ({ memberId: m.id, amount: Math.round((parseFloat(String(exacts[m.id]).replace(/,/g,'')) || 0) * 100) / 100 }))
             .filter(s => s.amount > 0);
+          if (!rows.length) return null;
+          return rows;
         }
         if (splitType === 'single') {
           return [{ memberId: single, amount: total }];
@@ -1406,26 +1453,28 @@
 
       const submit = async () => {
         setErr('');
-        if (!desc.trim())         { setErr('Please add a description.'); return; }
-        if (!total || total <= 0) { setErr('Enter a valid amount.'); return; }
+        if (!desc.trim()) { setErr('Please add a description.'); return; }
+        const effectiveTotal = splitType === 'exact' ? exTotal : total;
+        if (!effectiveTotal || effectiveTotal <= 0) { setErr('Enter a valid amount.'); return; }
         const splits = buildSplits();
         if (!splits) {
           if (splitType === 'equal')   { setErr('Select at least one person.'); return; }
           if (splitType === 'percent') { setErr(`Percentages must sum to 100% — currently ${pctTotal.toFixed(1)}%`); return; }
-          if (splitType === 'exact')   { setErr(`Amounts must sum to ${fmt(total, currency)} — currently ${fmt(exTotal, currency)}`); return; }
+          if (splitType === 'exact')   { setErr('Enter amounts for at least one person.'); return; }
         }
         setLoad(true);
         try {
+          const finalAmount = splitType === 'exact' ? exTotal : total;
           if (isEdit) {
-            await editExpense(editExpense.id, {
+            await updateExpenseRecord(editExpense.id, {
               paid_by_member_id: paidBy,
-              amount: total, currency, date,
+              amount: finalAmount, currency, date,
               description: desc.trim(),
             }, splits);
           } else {
             await saveExpense(trip.id, {
               paid_by_member_id: paidBy,
-              amount: total, currency, date,
+              amount: finalAmount, currency, date,
               description: desc.trim(),
             }, splits, user.id);
           }
@@ -1447,7 +1496,14 @@
 
             <div className="flex gap-2">
               <div className="flex-1">
-                <TextInput label="Amount *" type="number" placeholder="0.00" min="0" step="0.01" value={amount} onChange={e => setAmt(e.target.value)} />
+                <Field label="Amount *">
+                  <input
+                    type="text" inputMode="decimal" placeholder="0.00"
+                    value={amount}
+                    onChange={e => setAmt(fmtAmt(e.target.value))}
+                    className={inputCls}
+                  />
+                </Field>
               </div>
               <div className="w-28">
                 <SelectInput label="Currency" value={currency} onChange={e => setCurr(e.target.value)}>
@@ -1516,7 +1572,7 @@
                         <Avatar name={m.name} idx={i} size="sm" />
                         <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
                         <input type="number" value={percents[m.id]} min="0" max="100" step="1"
-                          onChange={e => setPercs(p => ({ ...p, [m.id]: e.target.value }))}
+                          onChange={e => handlePercentChange(m.id, e.target.value)}
                           className="w-16 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
                         <span className="text-xs text-muted w-4">%</span>
                         {total > 0 && (
@@ -1532,10 +1588,9 @@
                 {/* Exact */}
                 {splitType === 'exact' && (
                   <div className="space-y-2">
-                    {total > 0 && (
-                      <div className={`text-right text-xs font-bold ${Math.abs(exTotal - total) > 0.02 ? 'text-rose' : 'text-moss'}`}>
-                        {fmt(exTotal, currency)} / {fmt(total, currency)}
-                        {Math.abs(exTotal - total) > 0.02 && ` · ${fmt(total - exTotal, currency)} left`}
+                    {exTotal > 0 && (
+                      <div className="text-right text-xs font-bold text-moss">
+                        Total: {fmt(exTotal, currency)}
                       </div>
                     )}
                     {members.map((m, i) => (
