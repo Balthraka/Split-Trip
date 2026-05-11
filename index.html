@@ -113,11 +113,36 @@
       }
     });
 
-    // Wake up Supabase free-tier instance immediately on page load,
-    // before auth check runs — reduces cold-start delay significantly
-    fetch(`${SUPABASE_URL}/rest/v1/`, {
+    // Timeout wrapper — rejects if a DB operation takes > 10 seconds
+    const withTimeout = async (fn, ms = 3000) => {
+      const attempt = () => Promise.race([
+        fn(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('TIMEOUT')), ms)
+        ),
+      ]);
+      try {
+        return await attempt();
+      } catch(e) {
+        if (e.message === 'TIMEOUT') {
+          // One silent retry — fixes stale connection on first action
+          try { return await attempt(); }
+          catch(e2) { throw new Error('Request timed out. Please check your connection and try again.'); }
+        }
+        throw e;
+      }
+    };
+
+    // Wake up Supabase free-tier instance on page load and whenever
+    // the user returns to the tab — prevents stale connection hangs
+    const pingSupabase = () => fetch(`${SUPABASE_URL}/rest/v1/`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
     }).catch(() => {});
+
+    pingSupabase();
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') pingSupabase();
+    });
 
     // ══════════════════════════════════════════════════
     // 💱  CURRENCIES  (supported by frankfurter.app)
@@ -274,10 +299,10 @@
     }
 
     async function createTrip(name, description, baseCurrency, expenseCurrency, createdBy, members) {
-      const { data: trip, error } = await db
+      const { data: trip, error } = await withTimeout(() => db
         .from('trips')
         .insert({ name, description, base_currency: baseCurrency, expense_currency: expenseCurrency, created_by: createdBy })
-        .select().single();
+        .select().single());
       if (error) throw error;
 
       const rows = members.map(m => ({
@@ -292,19 +317,19 @@
     }
 
     async function addMemberToTrip(tripId, name, email) {
-      const { data, error } = await db
+      const { data, error } = await withTimeout(() => db
         .from('trip_members')
         .insert({ trip_id: tripId, name, email: email ? email.trim().toLowerCase() : null })
-        .select().single();
+        .select().single());
       if (error) throw error;
       return data;
     }
 
     async function saveExpense(tripId, expenseData, splits, userId) {
-      const { data: exp, error } = await db
+      const { data: exp, error } = await withTimeout(() => db
         .from('expenses')
         .insert({ trip_id: tripId, ...expenseData, created_by: userId })
-        .select().single();
+        .select().single());
       if (error) throw error;
 
       const splitRows = splits.map(s => ({
@@ -325,7 +350,7 @@
     }
 
     async function updateExpenseRecord(expenseId, expenseData, splits) {
-      const { error } = await db.from('expenses').update(expenseData).eq('id', expenseId);
+      const { error } = await withTimeout(() => db.from('expenses').update(expenseData).eq('id', expenseId));
       if (error) throw error;
       const { error: de } = await db.from('expense_splits').delete().eq('expense_id', expenseId);
       if (de) throw de;
@@ -340,7 +365,7 @@
     }
 
     async function updateTrip(tripId, data) {
-      const { error } = await db.from('trips').update(data).eq('id', tripId);
+      const { error } = await withTimeout(() => db.from('trips').update(data).eq('id', tripId));
       if (error) throw error;
     }
 
@@ -351,10 +376,10 @@
 
     async function updateProfileName(userId, name) {
       // Update profile table
-      const { error } = await db.from('profiles').update({ name }).eq('id', userId);
+      const { error } = await withTimeout(() => db.from('profiles').update({ name }).eq('id', userId));
       if (error) throw error;
       // Also update all trip_members rows for this user so everyone sees the new name
-      const { error: me } = await db.from('trip_members').update({ name }).eq('user_id', userId);
+      const { error: me } = await withTimeout(() => db.from('trip_members').update({ name }).eq('user_id', userId));
       if (me) throw me;
     }
 
@@ -406,7 +431,7 @@
     // ══════════════════════════════════════════════════
     // 🧩  SHARED UI COMPONENTS
     // ══════════════════════════════════════════════════
-    const { useState, useEffect, useRef, useCallback, useMemo } = React;
+    const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 
     function Spinner({ dark }) {
       return <div className={`spinner ${dark ? 'spinner-dark' : ''}`} />;
@@ -1371,7 +1396,30 @@
       const [currency, setCurr]   = useState(editExpense?.currency || trip.expense_currency || trip.base_currency);
       const [date, setDate]       = useState(editExpense?.date || todayISO());
       const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
-      const [splitType, setSplit] = useState(isEdit ? 'exact' : 'equal');
+      const [splitType, setSplitRaw] = useState(isEdit ? 'exact' : 'equal');
+      const setSplit = (type) => {
+        // When switching to exact, pre-fill equally if exacts are all empty
+        if (type === 'exact' && total > 0) {
+          const hasValues = Object.values(exacts).some(v => parseFloat(String(v).replace(/,/g,'')) > 0);
+          if (!hasValues) {
+            const share = Math.round(total / members.length * 100) / 100;
+            const ids = members.map(m => m.id);
+            const newEx = {};
+            let running = 0;
+            ids.forEach((id, i) => {
+              if (i === ids.length - 1) {
+                newEx[id] = String(Math.max(0, Math.round((total - running) * 100) / 100));
+              } else {
+                newEx[id] = String(share);
+                running += share;
+              }
+            });
+            skipAmtSync.current = true;
+            setExacts(newEx);
+          }
+        }
+        setSplitRaw(type);
+      };
       const [equalSet, setEqSet]  = useState(() => new Set(members.map(m => m.id)));
       const [percents, setPercs]  = useState(() => Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(1)])));
       const [exacts, setExacts]   = useState(() => {
@@ -1385,14 +1433,74 @@
       const [single, setSingle]   = useState(members[1]?.id || members[0]?.id || '');
       const [err, setErr]         = useState('');
       const [loading, setLoad]    = useState(false);
+      const amtRef       = useRef(null);
+      const cursorRef    = useRef(null);
+      const skipAmtSync  = useRef(false);
+
+      useLayoutEffect(() => {
+        if (cursorRef.current !== null && amtRef.current) {
+          amtRef.current.setSelectionRange(cursorRef.current, cursorRef.current);
+          cursorRef.current = null;
+        }
+      });
 
       const total    = parseAmt(amount);
+
+      // Preserve cursor position through comma-formatting re-renders
+      const handleAmtChange = (e) => {
+        const el  = e.target;
+        const raw = el.value;
+        const pos = el.selectionStart;
+        // Count digit-characters (non-comma) before cursor in raw string
+        const digitsBefore = raw.slice(0, pos).replace(/,/g, '').length;
+        const formatted = fmtAmt(raw);
+        // Find where that digit-count falls in the formatted string
+        let digits = 0, newPos = formatted.length;
+        for (let i = 0; i < formatted.length; i++) {
+          if (formatted[i] !== ',') {
+            if (digits === digitsBefore) { newPos = i; break; }
+            digits++;
+          }
+        }
+        // Handle cursor-at-start (digitsBefore === 0)
+        if (digitsBefore === 0) newPos = 0;
+        cursorRef.current = newPos;
+
+        // In exact mode, scale existing splits proportionally to new amount
+        if (splitType === 'exact') {
+          const newTotal = parseAmt(formatted);
+          const currentSum = Object.values(exacts).reduce(
+            (s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0
+          );
+          if (currentSum > 0 && newTotal > 0 && Math.abs(newTotal - currentSum) > 0.005) {
+            const scale = newTotal / currentSum;
+            const ids = Object.keys(exacts);
+            const newEx = {};
+            let running = 0;
+            ids.forEach((id, i) => {
+              if (i === ids.length - 1) {
+                newEx[id] = String(Math.max(0, Math.round((newTotal - running) * 100) / 100));
+              } else {
+                const scaled = Math.round((parseFloat(String(exacts[id]).replace(/,/g,'')) || 0) * scale * 100) / 100;
+                newEx[id] = String(scaled);
+                running += scaled;
+              }
+            });
+            skipAmtSync.current = true; // prevent exacts→amount feedback loop
+            setExacts(newEx);
+          }
+        }
+
+        setAmt(formatted);
+      };
       const pctTotal = Object.values(percents).reduce((s, v) => s + (parseFloat(v) || 0), 0);
       const exTotal  = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
 
-      // Fix 3: in exact mode, keep total in sync with sum of splits
+      // In exact mode, keep total in sync with sum of splits
+      // (suppressed when amount change triggered the exacts update)
       useEffect(() => {
         if (splitType === 'exact') {
+          if (skipAmtSync.current) { skipAmtSync.current = false; return; }
           const sum = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
           if (sum > 0) setAmt(fmtAmt(sum.toFixed(2)));
         }
@@ -1498,9 +1606,10 @@
               <div className="flex-1">
                 <Field label="Amount *">
                   <input
+                    ref={amtRef}
                     type="text" inputMode="decimal" placeholder="0.00"
                     value={amount}
-                    onChange={e => setAmt(fmtAmt(e.target.value))}
+                    onChange={handleAmtChange}
                     className={inputCls}
                   />
                 </Field>
