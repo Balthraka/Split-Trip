@@ -114,35 +114,41 @@
     });
 
     // Timeout wrapper — rejects if a DB operation takes > 10 seconds
-    const withTimeout = async (fn, ms = 3000) => {
-      const attempt = () => Promise.race([
-        fn(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('TIMEOUT')), ms)
-        ),
-      ]);
-      try {
-        return await attempt();
-      } catch(e) {
-        if (e.message === 'TIMEOUT') {
-          // One silent retry — fixes stale connection on first action
-          try { return await attempt(); }
-          catch(e2) { throw new Error('Request timed out. Please check your connection and try again.'); }
-        }
-        throw e;
-      }
-    };
-
-    // Wake up Supabase free-tier instance on page load and whenever
-    // the user returns to the tab — prevents stale connection hangs
+    // Ping Supabase to keep connection warm (free tier sleeps when idle)
     const pingSupabase = () => fetch(`${SUPABASE_URL}/rest/v1/`, {
       headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
     }).catch(() => {});
 
+    // Ping on load, on tab focus, and every 30s to prevent idle sleep
     pingSupabase();
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') pingSupabase();
     });
+    setInterval(pingSupabase, 30000);
+
+    // withTimeout: 3s first attempt. On timeout, re-pings Supabase to
+    // warm the connection, then retries with 8s — works without refresh.
+    const withTimeout = async (fn, ms = 3000) => {
+      const attempt = (timeout) => Promise.race([
+        fn(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('TIMEOUT')), timeout)
+        ),
+      ]);
+      try {
+        return await attempt(ms);
+      } catch(e) {
+        if (e.message === 'TIMEOUT') {
+          // Re-ping to wake the connection, then retry with longer timeout
+          await pingSupabase();
+          try { return await attempt(8000); }
+          catch(e2) {
+            throw new Error('Connection is slow — your data is still here. Tap the button to try again.');
+          }
+        }
+        throw e;
+      }
+    };
 
     // ══════════════════════════════════════════════════
     // 💱  CURRENCIES  (supported by frankfurter.app)
@@ -963,8 +969,8 @@
     function CreateTripModal({ user, profile, onCreated, onClose }) {
       const [name, setName]     = useState('');
       const [desc, setDesc]     = useState('');
-      const [curr, setCurr]     = useState('EUR');
-      const [expCurr, setExpCurr] = useState('EUR');
+      const [curr, setCurr]     = useState('AUD');
+      const [expCurr, setExpCurr] = useState('AUD');
       const [members, setMems]  = useState([
         { key: 0, name: profile?.name || user.email.split('@')[0], email: user.email, userId: user.id, isYou: true },
       ]);
@@ -1000,10 +1006,10 @@
             <TextInput label="Trip name *" placeholder="Italy 2025, Japan Trip, Vegas Weekend…" value={name} onChange={e => setName(e.target.value)} />
             <TextInput label="Description" placeholder="Optional note about the trip" value={desc} onChange={e => setDesc(e.target.value)} />
             <div className="grid grid-cols-2 gap-3">
-              <SelectInput label="Default settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
+              <SelectInput label="Default expense currency" value={expCurr} onChange={e => setExpCurr(e.target.value)}>
                 {CURRENCIES.map(c => <option key={c}>{c}</option>)}
               </SelectInput>
-              <SelectInput label="Default expense currency" value={expCurr} onChange={e => setExpCurr(e.target.value)}>
+              <SelectInput label="Default settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
                 {CURRENCIES.map(c => <option key={c}>{c}</option>)}
               </SelectInput>
             </div>
@@ -1396,7 +1402,7 @@
       const [currency, setCurr]   = useState(editExpense?.currency || trip.expense_currency || trip.base_currency);
       const [date, setDate]       = useState(editExpense?.date || todayISO());
       const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
-      const [splitType, setSplitRaw] = useState(isEdit ? 'exact' : 'equal');
+      const [splitType, setSplitRaw] = useState(isEdit ? 'percent' : 'equal');
       const setSplit = (type) => {
         // When switching to exact, pre-fill equally if exacts are all empty
         if (type === 'exact' && total > 0) {
@@ -1414,14 +1420,23 @@
                 running += share;
               }
             });
-            skipAmtSync.current = true;
             setExacts(newEx);
           }
         }
         setSplitRaw(type);
       };
       const [equalSet, setEqSet]  = useState(() => new Set(members.map(m => m.id)));
-      const [percents, setPercs]  = useState(() => Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(1)])));
+      const [percents, setPercs]  = useState(() => {
+        if (isEdit && editExpense?.expense_splits?.length && editExpense.amount > 0) {
+          const base = Object.fromEntries(members.map(m => [m.id, '0']));
+          editExpense.expense_splits.forEach(s => {
+            const pct = Math.round(s.amount / editExpense.amount * 1000) / 10;
+            base[s.member_id] = String(pct);
+          });
+          return base;
+        }
+        return Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(1)]));
+      });
       const [exacts, setExacts]   = useState(() => {
         if (isEdit) {
           const base = Object.fromEntries(members.map(m => [m.id, '']));
@@ -1433,9 +1448,8 @@
       const [single, setSingle]   = useState(members[1]?.id || members[0]?.id || '');
       const [err, setErr]         = useState('');
       const [loading, setLoad]    = useState(false);
-      const amtRef       = useRef(null);
-      const cursorRef    = useRef(null);
-      const skipAmtSync  = useRef(false);
+      const amtRef    = useRef(null);
+      const cursorRef = useRef(null);
 
       useLayoutEffect(() => {
         if (cursorRef.current !== null && amtRef.current) {
@@ -1465,46 +1479,10 @@
         // Handle cursor-at-start (digitsBefore === 0)
         if (digitsBefore === 0) newPos = 0;
         cursorRef.current = newPos;
-
-        // In exact mode, scale existing splits proportionally to new amount
-        if (splitType === 'exact') {
-          const newTotal = parseAmt(formatted);
-          const currentSum = Object.values(exacts).reduce(
-            (s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0
-          );
-          if (currentSum > 0 && newTotal > 0 && Math.abs(newTotal - currentSum) > 0.005) {
-            const scale = newTotal / currentSum;
-            const ids = Object.keys(exacts);
-            const newEx = {};
-            let running = 0;
-            ids.forEach((id, i) => {
-              if (i === ids.length - 1) {
-                newEx[id] = String(Math.max(0, Math.round((newTotal - running) * 100) / 100));
-              } else {
-                const scaled = Math.round((parseFloat(String(exacts[id]).replace(/,/g,'')) || 0) * scale * 100) / 100;
-                newEx[id] = String(scaled);
-                running += scaled;
-              }
-            });
-            skipAmtSync.current = true; // prevent exacts→amount feedback loop
-            setExacts(newEx);
-          }
-        }
-
         setAmt(formatted);
       };
       const pctTotal = Object.values(percents).reduce((s, v) => s + (parseFloat(v) || 0), 0);
       const exTotal  = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
-
-      // In exact mode, keep total in sync with sum of splits
-      // (suppressed when amount change triggered the exacts update)
-      useEffect(() => {
-        if (splitType === 'exact') {
-          if (skipAmtSync.current) { skipAmtSync.current = false; return; }
-          const sum = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
-          if (sum > 0) setAmt(fmtAmt(sum.toFixed(2)));
-        }
-      }, [exacts, splitType]);
 
       // Fix 2: auto-distribute remaining % DOWNWARD only
       // People above the changed field are never touched
@@ -1532,6 +1510,28 @@
           });
         }
         setPercs(newPercs);
+      };
+
+      // Exact mode: change one amount, redistribute remainder downward
+      const handleExactChange = (memberId, newVal) => {
+        const idx    = members.findIndex(m => m.id === memberId);
+        const newEx  = { ...exacts, [memberId]: newVal };
+        const sumAbove = members.slice(0, idx).reduce(
+          (s, m) => s + (parseFloat(String(exacts[m.id]).replace(/,/g,'')) || 0), 0
+        );
+        const remaining = Math.max(0, total - sumAbove - (parseFloat(String(newVal).replace(/,/g,'')) || 0));
+        const below = members.slice(idx + 1);
+        if (below.length > 0) {
+          const perBelow = remaining / below.length;
+          below.forEach((m, i) => {
+            const isLast = i === below.length - 1;
+            const soFar  = below.slice(0, i).reduce(
+              (s, om) => s + (parseFloat(String(newEx[om.id]).replace(/,/g,'')) || 0), 0
+            );
+            newEx[m.id] = String(Math.round((isLast ? remaining - soFar : perBelow) * 100) / 100);
+          });
+        }
+        setExacts(newEx);
       };
 
       const buildSplits = () => {
@@ -1572,7 +1572,7 @@
         }
         setLoad(true);
         try {
-          const finalAmount = splitType === 'exact' ? exTotal : total;
+          const finalAmount = total;
           if (isEdit) {
             await updateExpenseRecord(editExpense.id, {
               paid_by_member_id: paidBy,
@@ -1697,9 +1697,10 @@
                 {/* Exact */}
                 {splitType === 'exact' && (
                   <div className="space-y-2">
-                    {exTotal > 0 && (
-                      <div className="text-right text-xs font-bold text-moss">
-                        Total: {fmt(exTotal, currency)}
+                    {total > 0 && (
+                      <div className={`text-right text-xs font-bold ${Math.abs(exTotal - total) > 0.02 ? 'text-rose' : 'text-moss'}`}>
+                        {fmt(exTotal, currency)} / {fmt(total, currency)}
+                        {Math.abs(exTotal - total) > 0.02 && ` · ${fmt(total - exTotal, currency)} unassigned`}
                       </div>
                     )}
                     {members.map((m, i) => (
@@ -1707,7 +1708,7 @@
                         <Avatar name={m.name} idx={i} size="sm" />
                         <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
                         <input type="number" value={exacts[m.id]} min="0" step="0.01" placeholder="0.00"
-                          onChange={e => setExacts(p => ({ ...p, [m.id]: e.target.value }))}
+                          onChange={e => handleExactChange(m.id, e.target.value)}
                           className="w-24 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
                       </div>
                     ))}
@@ -2053,10 +2054,10 @@
             <TextInput label="Trip name *" value={name} onChange={e => setName(e.target.value)} />
             <TextInput label="Description" value={desc} onChange={e => setDesc(e.target.value)} />
             <div className="grid grid-cols-2 gap-3">
-              <SelectInput label="Default settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
+              <SelectInput label="Default expense currency" value={expCurr} onChange={e => setExpCurr(e.target.value)}>
                 {CURRENCIES.map(c => <option key={c}>{c}</option>)}
               </SelectInput>
-              <SelectInput label="Default expense currency" value={expCurr} onChange={e => setExpCurr(e.target.value)}>
+              <SelectInput label="Default settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
                 {CURRENCIES.map(c => <option key={c}>{c}</option>)}
               </SelectInput>
             </div>
