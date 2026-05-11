@@ -75,7 +75,9 @@
     ::-webkit-scrollbar-thumb { background: #C8B89A; border-radius: 2px; }
 
     /* Input styling override */
-    input[type="number"]::-webkit-inner-spin-button { opacity: 0.4; }
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type="number"] { -moz-appearance: textfield; }
 
     /* Checkbox */
     input[type="checkbox"] { accent-color: #C8964C; }
@@ -106,7 +108,7 @@
     // ══════════════════════════════════════════════════
     // 🔌  SUPABASE CLIENT
     // ══════════════════════════════════════════════════
-    const db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    let db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: {
         storage: window.localStorage,
         detectSessionInUrl: false,
@@ -126,8 +128,15 @@
     });
     setInterval(pingSupabase, 30000);
 
-    // withTimeout: 3s first attempt. On timeout, re-pings Supabase to
-    // warm the connection, then retries with 8s — works without refresh.
+    // Recreates the Supabase client — used on timeout to clear zombie connections.
+    // Refreshing the page works because it creates a new client; this does the same.
+    const makeClient = () => supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { storage: window.localStorage, detectSessionInUrl: false }
+    });
+
+    // withTimeout: 3s first attempt. On timeout, recreates the client (clears
+    // zombie connections), re-pings, then retries with 5s. This means the retry
+    // button works without needing a page refresh.
     const withTimeout = async (fn, ms = 3000) => {
       const attempt = (timeout) => Promise.race([
         fn(),
@@ -139,9 +148,10 @@
         return await attempt(ms);
       } catch(e) {
         if (e.message === 'TIMEOUT') {
-          // Re-ping to wake the connection, then retry with longer timeout
+          // Recreate client to clear zombie connections, then warm + retry
+          db = makeClient();
           await pingSupabase();
-          try { return await attempt(8000); }
+          try { return await attempt(5000); }
           catch(e2) {
             throw new Error('Connection is slow — your data is still here. Tap the button to try again.');
           }
@@ -1742,7 +1752,7 @@
                         <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
                         <input type="number" value={exacts[m.id]} min="0" step="0.01" placeholder="0.00"
                           onChange={e => handleExactChange(m.id, e.target.value)}
-                          className="w-24 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                          className="w-32 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
                       </div>
                     ))}
                   </div>
