@@ -1484,6 +1484,22 @@
       const pctTotal = Object.values(percents).reduce((s, v) => s + (parseFloat(v) || 0), 0);
       const exTotal  = Object.values(exacts).reduce((s, v) => s + (parseFloat(String(v).replace(/,/g,'')) || 0), 0);
 
+      // Compute actual equal-split amounts including last-person rounding remainder
+      const equalAmounts = useMemo(() => {
+        if (total <= 0 || !equalSet.size) return {};
+        const inc = members.filter(m => equalSet.has(m.id));
+        const share = Math.floor(total / inc.length * 100) / 100;
+        const out = {};
+        let running = 0;
+        inc.forEach((m, i) => {
+          const isLast = i === inc.length - 1;
+          const amt = isLast ? Math.round((total - running) * 100) / 100 : share;
+          out[m.id] = amt;
+          running += amt;
+        });
+        return out;
+      }, [total, equalSet, members]);
+
       // Fix 2: auto-distribute remaining % DOWNWARD only
       // People above the changed field are never touched
       const handlePercentChange = (memberId, newVal) => {
@@ -1672,12 +1688,14 @@
                             setEqSet(s);
                           }} className="w-4 h-4" />
                         <Avatar name={m.name} idx={i} size="sm" />
-                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
-                        {total > 0 && equalSet.has(m.id) && equalSet.size > 0 && (
-                          <span className="text-xs text-muted font-semibold">
-                            {fmt(total / equalSet.size, currency)}
-                          </span>
-                        )}
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm text-ink font-medium block truncate">{m.name}</span>
+                          {total > 0 && equalSet.has(m.id) && equalAmounts[m.id] !== undefined && (
+                            <span className="text-xs text-muted font-semibold">
+                              {fmt(equalAmounts[m.id], currency)}
+                            </span>
+                          )}
+                        </div>
                       </label>
                     ))}
                   </div>
@@ -1690,18 +1708,20 @@
                       {pctTotal.toFixed(2)}% / 100%
                     </div>
                     {members.map((m, i) => (
-                      <div key={m.id} className="flex items-center gap-2">
+                      <div key={m.id} className="flex items-center gap-2 py-0.5">
                         <Avatar name={m.name} idx={i} size="sm" />
-                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm text-ink font-medium block truncate">{m.name}</span>
+                          {total > 0 && (
+                            <span className="text-xs text-muted font-semibold">
+                              {fmt(total * (parseFloat(percents[m.id]) || 0) / 100, currency)}
+                            </span>
+                          )}
+                        </div>
                         <input type="number" value={percents[m.id]} min="0" max="100" step="0.01"
                           onChange={e => handlePercentChange(m.id, e.target.value)}
-                          className="w-16 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
-                        <span className="text-xs text-muted w-4">%</span>
-                        {total > 0 && (
-                          <span className="text-xs text-muted w-20 text-right font-semibold">
-                            {fmt(total * (parseFloat(percents[m.id]) || 0) / 100, currency)}
-                          </span>
-                        )}
+                          className="w-20 flex-shrink-0 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                        <span className="text-xs text-muted flex-shrink-0">%</span>
                       </div>
                     ))}
                   </div>
