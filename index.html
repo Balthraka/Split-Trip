@@ -269,10 +269,10 @@
       }));
     }
 
-    async function createTrip(name, description, baseCurrency, createdBy, members) {
+    async function createTrip(name, description, baseCurrency, expenseCurrency, createdBy, members) {
       const { data: trip, error } = await db
         .from('trips')
-        .insert({ name, description, base_currency: baseCurrency, created_by: createdBy })
+        .insert({ name, description, base_currency: baseCurrency, expense_currency: expenseCurrency, created_by: createdBy })
         .select().single();
       if (error) throw error;
 
@@ -810,21 +810,22 @@
                   </div>
                 ) : (
                   <button onClick={startEditName}
-                    className="hidden sm:flex items-center gap-1.5 text-xs text-cream/50 hover:text-cream transition group">
-                    <span>{profile?.name || user.email}</span>
-                    <i className="fa-solid fa-pen text-cream/20 group-hover:text-cream/60 transition text-xs" />
+                    className="flex items-center gap-1.5 text-xs text-cream/50 hover:text-cream transition group max-w-[120px]">
+                    <span className="truncate">{profile?.name || user.email}</span>
+                    <i className="fa-solid fa-pen text-cream/20 group-hover:text-cream/60 transition text-xs flex-shrink-0" />
                   </button>
                 )}
                 <button onClick={() => setShowAccount(true)}
-                  className="text-cream/50 hover:text-cream transition text-sm" title="Account settings">
-                  <i className="fa-solid fa-gear" />
+                  className="w-9 h-9 flex items-center justify-center rounded-xl text-cream/50 hover:text-cream hover:bg-cream/10 transition" title="Account settings">
+                  <i className="fa-solid fa-gear text-sm" />
                 </button>
-                <button onClick={async () => {
-                    await db.auth.signOut();
+                <button onClick={() => {
+                    db.auth.signOut().catch(() => {}); // fire and forget — server cleanup
+                    localStorage.clear();              // clear session immediately
                     window.location.reload();
                   }}
-                  className="text-cream/50 hover:text-cream transition text-sm" title="Sign out">
-                  <i className="fa-solid fa-arrow-right-from-bracket" />
+                  className="w-9 h-9 flex items-center justify-center rounded-xl text-cream/50 hover:text-cream hover:bg-cream/10 transition" title="Sign out">
+                  <i className="fa-solid fa-arrow-right-from-bracket text-sm" />
                 </button>
               </div>
             </div>
@@ -925,6 +926,7 @@
       const [name, setName]     = useState('');
       const [desc, setDesc]     = useState('');
       const [curr, setCurr]     = useState('EUR');
+      const [expCurr, setExpCurr] = useState('EUR');
       const [members, setMems]  = useState([
         { key: 0, name: profile?.name || 'Me', email: user.email, userId: user.id, isYou: true },
       ]);
@@ -949,7 +951,7 @@
         if (finalMembers.length < 2) { setErr('Add at least one other person.'); return; }
         setErr(''); setLoad(true);
         try {
-          const trip = await createTrip(name.trim(), desc.trim(), curr, user.id, finalMembers);
+          const trip = await createTrip(name.trim(), desc.trim(), curr, expCurr, user.id, finalMembers);
           onCreated(trip);
         } catch (e) { setLoad(false); setErr(e?.message || 'Failed to create trip.'); }
       };
@@ -959,9 +961,14 @@
           <div className="space-y-4">
             <TextInput label="Trip name *" placeholder="Italy 2025, Japan Trip, Vegas Weekend…" value={name} onChange={e => setName(e.target.value)} />
             <TextInput label="Description" placeholder="Optional note about the trip" value={desc} onChange={e => setDesc(e.target.value)} />
-            <SelectInput label="Settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
-              {CURRENCIES.map(c => <option key={c}>{c}</option>)}
-            </SelectInput>
+            <div className="grid grid-cols-2 gap-3">
+              <SelectInput label="Default settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
+                {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+              </SelectInput>
+              <SelectInput label="Default expense currency" value={expCurr} onChange={e => setExpCurr(e.target.value)}>
+                {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+              </SelectInput>
+            </div>
 
             {/* Members */}
             <Field label={`People on this trip (${members.length})`}
@@ -1336,7 +1343,7 @@
       const isEdit = !!editExpense;
       const [desc, setDesc]       = useState(editExpense?.description || '');
       const [amount, setAmt]      = useState(editExpense ? String(editExpense.amount) : '');
-      const [currency, setCurr]   = useState(editExpense?.currency || trip.base_currency);
+      const [currency, setCurr]   = useState(editExpense?.currency || trip.expense_currency || trip.base_currency);
       const [date, setDate]       = useState(editExpense?.date || todayISO());
       const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
       const [splitType, setSplit] = useState(isEdit ? 'exact' : 'equal');
@@ -1820,18 +1827,19 @@
     // ✏️  EDIT TRIP MODAL
     // ══════════════════════════════════════════════════
     function EditTripModal({ trip, onSaved, onClose }) {
-      const [name, setName]   = useState(trip.name);
-      const [desc, setDesc]   = useState(trip.description || '');
-      const [curr, setCurr]   = useState(trip.base_currency);
-      const [err, setErr]     = useState('');
-      const [loading, setLoad] = useState(false);
+      const [name, setName]     = useState(trip.name);
+      const [desc, setDesc]     = useState(trip.description || '');
+      const [curr, setCurr]     = useState(trip.base_currency);
+      const [expCurr, setExpCurr] = useState(trip.expense_currency || trip.base_currency);
+      const [err, setErr]       = useState('');
+      const [loading, setLoad]  = useState(false);
 
       const submit = async () => {
         if (!name.trim()) { setErr('Trip name is required.'); return; }
         setErr(''); setLoad(true);
         try {
-          await updateTrip(trip.id, { name: name.trim(), description: desc.trim(), base_currency: curr });
-          onSaved({ ...trip, name: name.trim(), description: desc.trim(), base_currency: curr });
+          await updateTrip(trip.id, { name: name.trim(), description: desc.trim(), base_currency: curr, expense_currency: expCurr });
+          onSaved({ ...trip, name: name.trim(), description: desc.trim(), base_currency: curr, expense_currency: expCurr });
         } catch(e) { setErr(e?.message || 'Could not save trip.'); setLoad(false); }
       };
 
@@ -1840,9 +1848,14 @@
           <div className="space-y-4">
             <TextInput label="Trip name *" value={name} onChange={e => setName(e.target.value)} />
             <TextInput label="Description" value={desc} onChange={e => setDesc(e.target.value)} />
-            <SelectInput label="Settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
-              {CURRENCIES.map(c => <option key={c}>{c}</option>)}
-            </SelectInput>
+            <div className="grid grid-cols-2 gap-3">
+              <SelectInput label="Default settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
+                {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+              </SelectInput>
+              <SelectInput label="Default expense currency" value={expCurr} onChange={e => setExpCurr(e.target.value)}>
+                {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+              </SelectInput>
+            </div>
             {err && <Toast message={err} />}
             <div className="flex gap-2 pt-1">
               <Btn variant="outline" full onClick={onClose}>Cancel</Btn>
