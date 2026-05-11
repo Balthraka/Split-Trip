@@ -126,21 +126,29 @@
     // ══════════════════════════════════════════════════
     // 🔄  EXCHANGE RATE  (cached, historical by date)
     // ══════════════════════════════════════════════════
+    // Cache entire base-currency response to minimise API calls
+    // e.g. 5 EUR expenses → only 1 fetch for eur@2025-01-10
     const _ratesCache = {};
 
     async function getRate(from, to, date) {
       if (from === to) return 1;
-      // Use 'latest' for today to avoid weekend/holiday gaps
       const today = new Date().toISOString().split('T')[0];
       const apiDate = date >= today ? 'latest' : date;
-      const key = `${from}→${to}@${apiDate}`;
-      if (_ratesCache[key] !== undefined) return _ratesCache[key];
-      const res = await fetch(`https://api.frankfurter.app/${apiDate}?from=${from}&to=${to}`);
-      if (!res.ok) throw new Error(`Rate API error: ${res.status}`);
-      const data = await res.json();
-      const rate = data.rates?.[to];
+      const fromL = from.toLowerCase();
+      const toL   = to.toLowerCase();
+      const cacheKey = `${fromL}@${apiDate}`;
+
+      if (!_ratesCache[cacheKey]) {
+        // jsDelivr-hosted currency API — no CORS issues, no API key, free
+        const url = `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${apiDate}/v1/currencies/${fromL}.json`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Rate API returned ${res.status}`);
+        const data = await res.json();
+        _ratesCache[cacheKey] = data[fromL];
+      }
+
+      const rate = _ratesCache[cacheKey]?.[toL];
       if (!rate) throw new Error(`No rate found for ${from}→${to}`);
-      _ratesCache[key] = rate;
       return rate;
     }
 
@@ -1393,7 +1401,7 @@
               {expenses.length > 0 && (
                 <p className="text-xs text-center text-muted/70 pb-1">
                   <i className="fa-solid fa-circle-info mr-1" />
-                  Rates via <a href="https://frankfurter.app" target="_blank" rel="noreferrer" className="underline">frankfurter.app</a> · Date of each expense used
+                  Rates via <a href="https://github.com/fawazahmed0/exchange-api" target="_blank" rel="noreferrer" className="underline">exchange-api</a> · Historical rate used per expense date
                 </p>
               )}
             </>
