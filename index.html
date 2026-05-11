@@ -123,11 +123,15 @@
     // 💱  CURRENCIES  (supported by frankfurter.app)
     // ══════════════════════════════════════════════════
     const CURRENCIES = [
-      'AUD','BGN','BRL','CAD','CHF','CNY','CZK','DKK',
-      'EUR','GBP','HKD','HUF','IDR','ILS','INR','ISK',
-      'JPY','KRW','MXN','MYR','NOK','NZD','PHP','PLN',
-      'RON','SEK','SGD','THB','TRY','USD','ZAR',
-    ].sort();
+      'AED','ALL','AMD','ARS','AUD','AZN','BDT','BGN','BHD','BND',
+      'BOB','BRL','CAD','CHF','CHF','CLP','CNY','COP','CZK','DKK',
+      'DZD','EGP','ETB','EUR','GBP','GEL','GHS','HKD','HUF','IDR',
+      'ILS','INR','IQD','ISK','JOD','JPY','KES','KHR','KRW','KWD',
+      'KZT','LAK','LBP','LKR','MAD','MDL','MMK','MXN','MYR','NGN',
+      'NOK','NPR','NZD','OMR','PEN','PHP','PKR','PLN','QAR','RON',
+      'RSD','SAR','SEK','SGD','THB','TRY','TWD','TZS','UAH','UGX',
+      'USD','UYU','VND','ZAR',
+    ].filter((v, i, a) => a.indexOf(v) === i).sort();
 
     // ══════════════════════════════════════════════════
     // 🔄  EXCHANGE RATE  (cached, historical by date)
@@ -279,7 +283,7 @@
       const rows = members.map(m => ({
         trip_id: trip.id,
         name: m.name,
-        email: m.email || null,
+        email: m.email ? m.email.trim().toLowerCase() : null,
         user_id: m.userId || null,
       }));
       const { error: me } = await db.from('trip_members').insert(rows);
@@ -290,7 +294,7 @@
     async function addMemberToTrip(tripId, name, email) {
       const { data, error } = await db
         .from('trip_members')
-        .insert({ trip_id: tripId, name, email: email || null })
+        .insert({ trip_id: tripId, name, email: email ? email.trim().toLowerCase() : null })
         .select().single();
       if (error) throw error;
       return data;
@@ -330,6 +334,11 @@
       if (se) throw se;
     }
 
+    async function removeMemberFromTrip(memberId) {
+      const { error } = await db.from('trip_members').delete().eq('id', memberId);
+      if (error) throw error;
+    }
+
     async function updateTrip(tripId, data) {
       const { error } = await db.from('trips').update(data).eq('id', tripId);
       if (error) throw error;
@@ -341,8 +350,12 @@
     }
 
     async function updateProfileName(userId, name) {
+      // Update profile table
       const { error } = await db.from('profiles').update({ name }).eq('id', userId);
       if (error) throw error;
+      // Also update all trip_members rows for this user so everyone sees the new name
+      const { error: me } = await db.from('trip_members').update({ name }).eq('user_id', userId);
+      if (me) throw me;
     }
 
     // ══════════════════════════════════════════════════
@@ -928,7 +941,7 @@
       const [curr, setCurr]     = useState('EUR');
       const [expCurr, setExpCurr] = useState('EUR');
       const [members, setMems]  = useState([
-        { key: 0, name: profile?.name || 'Me', email: user.email, userId: user.id, isYou: true },
+        { key: 0, name: profile?.name || user.email.split('@')[0], email: user.email, userId: user.id, isYou: true },
       ]);
       const [newName, setNName] = useState('');
       const [newEmail, setNEml] = useState('');
@@ -993,17 +1006,19 @@
               </div>
               <div className="bg-parchment rounded-xl p-3">
                 <p className="text-xs font-semibold text-muted uppercase tracking-widest mb-2">Add a person</p>
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2">
                   <input value={newName} onChange={e => setNName(e.target.value)} placeholder="Name *"
                     onKeyDown={e => e.key === 'Enter' && addLocal()}
-                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
-                  <input value={newEmail} onChange={e => setNEml(e.target.value)} placeholder="Email (optional)"
-                    onKeyDown={e => e.key === 'Enter' && addLocal()}
-                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
-                  <button onClick={addLocal}
-                    className="bg-gold text-white px-3 py-2 rounded-lg text-sm hover:bg-gold-dark transition">
-                    <i className="fa-solid fa-plus" />
-                  </button>
+                    className="w-full px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                  <div className="flex gap-2">
+                    <input value={newEmail} onChange={e => setNEml(e.target.value)} placeholder="Email (optional)"
+                      onKeyDown={e => e.key === 'Enter' && addLocal()}
+                      className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                    <button onClick={addLocal}
+                      className="bg-gold text-white px-4 py-2 rounded-lg text-sm hover:bg-gold-dark transition flex-shrink-0">
+                      <i className="fa-solid fa-plus" />
+                    </button>
+                  </div>
                 </div>
               </div>
             </Field>
@@ -1153,7 +1168,7 @@
               <>
                 {tab === 'expenses'    && <ExpensesTab    trip={trip} members={members} expenses={expenses} user={user} onRefresh={load} />}
                 {tab === 'settlements' && <SettlementsTab trip={trip} members={members} expenses={expenses} />}
-                {tab === 'people'      && <PeopleTab      trip={trip} members={members} user={user} onRefresh={load} />}
+                {tab === 'people'      && <PeopleTab      trip={trip} members={members} user={user} isCreator={isCreator} onRefresh={load} />}
               </>
             )}
           </div>
@@ -1699,11 +1714,13 @@
     // ══════════════════════════════════════════════════
     // 👥  PEOPLE TAB
     // ══════════════════════════════════════════════════
-    function MemberListWithEdit({ members, user, onRefresh }) {
-      const [editingId, setEditingId] = useState(null);
-      const [editName, setEditName]   = useState('');
-      const [saving, setSaving]       = useState(false);
-      const [editErr, setEditErr]     = useState('');
+    function MemberListWithEdit({ members, user, isCreator, onRefresh }) {
+      const [editingId, setEditingId]   = useState(null);
+      const [editName, setEditName]     = useState('');
+      const [saving, setSaving]         = useState(false);
+      const [editErr, setEditErr]       = useState('');
+      const [confirmRemove, setConfirm] = useState(null);
+      const [removing, setRemoving]     = useState(null);
 
       const startEdit = (m) => { setEditingId(m.id); setEditName(m.name); setEditErr(''); };
       const cancelEdit = () => { setEditingId(null); setEditErr(''); };
@@ -1717,6 +1734,15 @@
           setEditingId(null);
         } catch(e) { setEditErr(e?.message || 'Could not save name.'); }
         setSaving(false);
+      };
+
+      const handleRemove = async (m) => {
+        setRemoving(m.id); setConfirm(null);
+        try {
+          await removeMemberFromTrip(m.id);
+          await onRefresh();
+        } catch(e) { alert(e?.message || 'Could not remove member.'); }
+        setRemoving(null);
       };
 
       return (
@@ -1751,6 +1777,22 @@
                       <i className="fa-solid fa-pen text-xs" />
                     </button>
                   )}
+                  {isCreator && !m.user_id && m.user_id !== user.id && (
+                    confirmRemove === m.id ? (
+                      <div className="flex items-center gap-1.5 ml-1">
+                        <button onClick={() => handleRemove(m)} disabled={removing === m.id}
+                          className="text-xs font-semibold text-rose hover:text-rose/70 transition disabled:opacity-50">
+                          {removing === m.id ? <Spinner /> : 'Remove'}
+                        </button>
+                        <button onClick={() => setConfirm(null)} className="text-xs text-muted hover:text-ink transition">Cancel</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConfirm(m.id)}
+                        className="text-muted/50 hover:text-rose transition ml-1" title="Remove from trip">
+                        <i className="fa-solid fa-user-minus text-xs" />
+                      </button>
+                    )
+                  )}
                 </div>
               )}
             </div>
@@ -1759,7 +1801,7 @@
       );
     }
 
-    function PeopleTab({ trip, members, user, onRefresh }) {
+    function PeopleTab({ trip, members, user, isCreator, onRefresh }) {
       const [showForm, setForm]   = useState(false);
       const [name, setName]       = useState('');
       const [email, setEmail]     = useState('');
@@ -1790,12 +1832,10 @@
 
             {showForm && (
               <div className="mx-4 mb-3 bg-parchment rounded-xl p-3 space-y-2">
-                <div className="flex gap-2">
-                  <input value={name} onChange={e => setName(e.target.value)} placeholder="Name *"
-                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
-                  <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email (optional)"
-                    className="flex-1 px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
-                </div>
+                <input value={name} onChange={e => setName(e.target.value)} placeholder="Name *"
+                  className="w-full px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email (optional)"
+                  className="w-full px-3 py-2 bg-white border border-ink/12 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-gold/40" />
                 {err && <p className="text-xs text-rose">{err}</p>}
                 <div className="flex gap-2">
                   <Btn variant="outline" sm full onClick={() => { setForm(false); setErr(''); }}>Cancel</Btn>
@@ -1804,7 +1844,7 @@
               </div>
             )}
 
-            <MemberListWithEdit members={members} user={user} onRefresh={onRefresh} />
+            <MemberListWithEdit members={members} user={user} isCreator={isCreator} onRefresh={onRefresh} />
           </div>
 
           {/* Invite instructions */}
