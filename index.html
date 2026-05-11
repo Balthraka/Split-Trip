@@ -658,7 +658,9 @@
         try {
           const { error } = await db.rpc('delete_my_account');
           if (error) throw error;
-          await db.auth.signOut();
+          // User no longer exists server-side, so skip the server sign-out call.
+          // Use scope:'local' to just wipe the cached session from localStorage.
+          await db.auth.signOut({ scope: 'local' });
           window.location.reload();
         } catch(e) { setDeleteErr(e?.message || 'Could not delete account.'); setDeletingAcct(false); }
       };
