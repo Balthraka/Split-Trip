@@ -308,10 +308,34 @@
     }
 
     async function removeExpense(expenseId) {
-      // Delete splits first, then expense
       const { error: se } = await db.from('expense_splits').delete().eq('expense_id', expenseId);
       if (se) throw se;
       const { error } = await db.from('expenses').delete().eq('id', expenseId);
+      if (error) throw error;
+    }
+
+    async function editExpense(expenseId, expenseData, splits) {
+      const { error } = await db.from('expenses').update(expenseData).eq('id', expenseId);
+      if (error) throw error;
+      const { error: de } = await db.from('expense_splits').delete().eq('expense_id', expenseId);
+      if (de) throw de;
+      const splitRows = splits.map(s => ({ expense_id: expenseId, member_id: s.memberId, amount: s.amount }));
+      const { error: se } = await db.from('expense_splits').insert(splitRows);
+      if (se) throw se;
+    }
+
+    async function updateTrip(tripId, data) {
+      const { error } = await db.from('trips').update(data).eq('id', tripId);
+      if (error) throw error;
+    }
+
+    async function deleteTripById(tripId) {
+      const { error } = await db.from('trips').delete().eq('id', tripId);
+      if (error) throw error;
+    }
+
+    async function updateProfileName(userId, name) {
+      const { error } = await db.from('profiles').update({ name }).eq('id', userId);
       if (error) throw error;
     }
 
@@ -706,9 +730,6 @@
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
                 <h3 className="font-semibold text-ink truncate">{trip.name}</h3>
-                <span className="text-xs font-semibold text-gold bg-gold-light px-2 py-0.5 rounded-full flex-shrink-0">
-                  {trip.base_currency}
-                </span>
               </div>
               <div className="flex items-center gap-2 mt-2">
                 <div className="flex -space-x-2">
@@ -827,12 +848,17 @@
     // ══════════════════════════════════════════════════
     // 📋  TRIP VIEW  (tabs wrapper)
     // ══════════════════════════════════════════════════
-    function TripView({ trip, user, profile, onBack }) {
+    function TripView({ trip: initialTrip, user, profile, onBack }) {
+      const [trip, setTrip]         = useState(initialTrip);
       const [tab, setTab]           = useState('expenses');
       const [members, setMembers]   = useState([]);
       const [expenses, setExpenses] = useState([]);
       const [loading, setLoading]   = useState(true);
       const [loadError, setLoadError] = useState('');
+      const [showEditTrip, setEditTrip] = useState(false);
+      const [confirmDelTrip, setConfirmDelTrip] = useState(false);
+      const [deletingTrip, setDeletingTrip] = useState(false);
+      const isCreator = trip.created_by === user.id;
 
       const load = useCallback(async () => {
         setLoading(true);
@@ -874,6 +900,32 @@
                   <h1 className="font-bold truncate tracking-tight">{trip.name}</h1>
                   <p className="text-xs text-cream/40 mt-0.5">{members.length} people · {trip.base_currency}</p>
                 </div>
+                {isCreator && (
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setEditTrip(true)}
+                      className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-cream/10 transition text-cream/50 hover:text-cream" title="Edit trip">
+                      <i className="fa-solid fa-pen text-xs" />
+                    </button>
+                    {confirmDelTrip ? (
+                      <div className="flex items-center gap-2 bg-rose/20 rounded-xl px-2 py-1">
+                        <span className="text-xs text-cream/70">Delete trip?</span>
+                        <button onClick={async () => {
+                          setDeletingTrip(true);
+                          try { await deleteTripById(trip.id); onBack(); }
+                          catch(e) { alert('Delete failed: ' + (e?.message||'error')); setDeletingTrip(false); setConfirmDelTrip(false); }
+                        }} disabled={deletingTrip} className="text-xs font-semibold text-rose-300 hover:text-white transition">
+                          {deletingTrip ? <Spinner /> : 'Yes'}
+                        </button>
+                        <button onClick={() => setConfirmDelTrip(false)} className="text-xs text-cream/50 hover:text-cream transition">No</button>
+                      </div>
+                    ) : (
+                      <button onClick={() => setConfirmDelTrip(true)}
+                        className="w-8 h-8 flex items-center justify-center rounded-xl hover:bg-cream/10 transition text-cream/50 hover:text-rose-300" title="Delete trip">
+                        <i className="fa-solid fa-trash-can text-xs" />
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
               <div className="flex gap-1 -mb-px">
                 {TABS.map(t => (
@@ -888,6 +940,12 @@
               </div>
             </div>
           </div>
+
+          {showEditTrip && (
+            <EditTripModal trip={trip}
+              onSaved={updated => { setTrip(updated); setEditTrip(false); }}
+              onClose={() => setEditTrip(false)} />
+          )}
 
           {/* Content */}
           <div className="flex-1 max-w-lg mx-auto w-full px-4 py-5">
@@ -916,8 +974,9 @@
     // 💸  EXPENSES TAB
     // ══════════════════════════════════════════════════
     function ExpensesTab({ trip, members, expenses, user, onRefresh }) {
-      const [showAdd, setAdd]  = useState(false);
-      const [deleting, setDel]   = useState(null);
+      const [showAdd, setAdd]   = useState(false);
+      const [editExp, setEdit]  = useState(null);
+      const [deleting, setDel]  = useState(null);
       const [confirmDel, setConf] = useState(null);
 
       const memberIdx  = (id) => members.findIndex(m => m.id === id);
@@ -979,6 +1038,8 @@
                     {dayExps.map(exp => (
                       <ExpenseCard key={exp.id} expense={exp}
                         memberName={memberName} memberIdx={memberIdx}
+                        userId={user.id}
+                        onEdit={() => setEdit(exp)}
                         onDelete={() => handleDelete(exp.id)}
                         onConfirmDelete={() => setConf(exp.id)}
                         onCancelDelete={() => setConf(null)}
@@ -1005,11 +1066,18 @@
               onAdded={() => { setAdd(false); onRefresh(); }}
               onClose={() => setAdd(false)} />
           )}
+          {editExp && (
+            <AddExpenseModal trip={trip} members={members} user={user}
+              editExpense={editExp}
+              onAdded={() => { setEdit(null); onRefresh(); }}
+              onClose={() => setEdit(null)} />
+          )}
         </div>
       );
     }
 
-    function ExpenseCard({ expense, memberName, memberIdx, onDelete, onConfirmDelete, onCancelDelete, onConfirm, deleting }) {
+    function ExpenseCard({ expense, memberName, memberIdx, userId, onEdit, onDelete, onConfirmDelete, onCancelDelete, onConfirm, deleting }) {
+      const isOwner = expense.created_by === userId;
       const [open, setOpen] = useState(false);
       const payer = memberName(expense.paid_by_member_id);
       const payerIdx = memberIdx(expense.paid_by_member_id);
@@ -1043,22 +1111,30 @@
                   </div>
                 ))}
               </div>
-              <div className="mt-3 pt-3 border-t border-parchment flex justify-end">
-                {onConfirm ? (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-muted">Sure?</span>
-                    <button onClick={onDelete} disabled={deleting}
-                      className="text-xs font-semibold text-rose hover:text-rose/70 transition disabled:opacity-50 flex items-center gap-1">
-                      {deleting ? <Spinner /> : null} Yes, delete
-                    </button>
-                    <button onClick={onCancelDelete} className="text-xs text-muted hover:text-ink transition">Cancel</button>
-                  </div>
-                ) : (
-                  <button onClick={onConfirmDelete} disabled={deleting}
-                    className="flex items-center gap-1.5 text-xs text-rose/60 hover:text-rose transition disabled:opacity-50">
-                    <i className="fa-solid fa-trash-can" /> Delete expense
+              <div className="mt-3 pt-3 border-t border-parchment flex items-center justify-between">
+                {isOwner && (
+                  <button onClick={onEdit}
+                    className="flex items-center gap-1.5 text-xs text-muted hover:text-ink transition">
+                    <i className="fa-solid fa-pen" /> Edit
                   </button>
                 )}
+                <div className="ml-auto">
+                  {isOwner && (onConfirm ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted">Sure?</span>
+                      <button onClick={onDelete} disabled={deleting}
+                        className="text-xs font-semibold text-rose hover:text-rose/70 transition disabled:opacity-50 flex items-center gap-1">
+                        {deleting ? <Spinner /> : null} Yes, delete
+                      </button>
+                      <button onClick={onCancelDelete} className="text-xs text-muted hover:text-ink transition">Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={onConfirmDelete} disabled={deleting}
+                      className="flex items-center gap-1.5 text-xs text-rose/60 hover:text-rose transition disabled:opacity-50">
+                      <i className="fa-solid fa-trash-can" /> Delete
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -1069,16 +1145,24 @@
     // ══════════════════════════════════════════════════
     // ➕  ADD EXPENSE MODAL
     // ══════════════════════════════════════════════════
-    function AddExpenseModal({ trip, members, user, onAdded, onClose }) {
-      const [desc, setDesc]       = useState('');
-      const [amount, setAmt]      = useState('');
-      const [currency, setCurr]   = useState(trip.base_currency);
-      const [date, setDate]       = useState(todayISO());
-      const [paidBy, setPaid]     = useState(members[0]?.id || '');
-      const [splitType, setSplit] = useState('equal');
+    function AddExpenseModal({ trip, members, user, editExpense, onAdded, onClose }) {
+      const isEdit = !!editExpense;
+      const [desc, setDesc]       = useState(editExpense?.description || '');
+      const [amount, setAmt]      = useState(editExpense ? String(editExpense.amount) : '');
+      const [currency, setCurr]   = useState(editExpense?.currency || trip.base_currency);
+      const [date, setDate]       = useState(editExpense?.date || todayISO());
+      const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
+      const [splitType, setSplit] = useState(isEdit ? 'exact' : 'equal');
       const [equalSet, setEqSet]  = useState(() => new Set(members.map(m => m.id)));
       const [percents, setPercs]  = useState(() => Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(1)])));
-      const [exacts, setExacts]   = useState(() => Object.fromEntries(members.map(m => [m.id, ''])));
+      const [exacts, setExacts]   = useState(() => {
+        if (isEdit) {
+          const base = Object.fromEntries(members.map(m => [m.id, '']));
+          (editExpense.expense_splits || []).forEach(s => { base[s.member_id] = String(s.amount); });
+          return base;
+        }
+        return Object.fromEntries(members.map(m => [m.id, '']));
+      });
       const [single, setSingle]   = useState(members[1]?.id || members[0]?.id || '');
       const [err, setErr]         = useState('');
       const [loading, setLoad]    = useState(false);
@@ -1123,11 +1207,19 @@
         }
         setLoad(true);
         try {
-          await saveExpense(trip.id, {
-            paid_by_member_id: paidBy,
-            amount: total, currency, date,
-            description: desc.trim(),
-          }, splits, user.id);
+          if (isEdit) {
+            await editExpense(editExpense.id, {
+              paid_by_member_id: paidBy,
+              amount: total, currency, date,
+              description: desc.trim(),
+            }, splits);
+          } else {
+            await saveExpense(trip.id, {
+              paid_by_member_id: paidBy,
+              amount: total, currency, date,
+              description: desc.trim(),
+            }, splits, user.id);
+          }
           onAdded();
         } catch (e) { setLoad(false); setErr(e?.message || 'Failed to save expense.'); }
       };
@@ -1140,7 +1232,7 @@
       ];
 
       return (
-        <Modal title="Add Expense" onClose={onClose} wide>
+        <Modal title={isEdit ? "Edit Expense" : "Add Expense"} onClose={onClose} wide>
           <div className="space-y-4">
             <TextInput label="Description *" placeholder="Dinner, train tickets, hotel deposit…" value={desc} onChange={e => setDesc(e.target.value)} />
 
@@ -1413,6 +1505,66 @@
     // ══════════════════════════════════════════════════
     // 👥  PEOPLE TAB
     // ══════════════════════════════════════════════════
+    function MemberListWithEdit({ members, user, onRefresh }) {
+      const [editingId, setEditingId] = useState(null);
+      const [editName, setEditName]   = useState('');
+      const [saving, setSaving]       = useState(false);
+      const [editErr, setEditErr]     = useState('');
+
+      const startEdit = (m) => { setEditingId(m.id); setEditName(m.name); setEditErr(''); };
+      const cancelEdit = () => { setEditingId(null); setEditErr(''); };
+
+      const saveEdit = async (m) => {
+        if (!editName.trim()) { setEditErr('Name cannot be empty.'); return; }
+        setSaving(true);
+        try {
+          await updateProfileName(user.id, editName.trim());
+          await onRefresh();
+          setEditingId(null);
+        } catch(e) { setEditErr(e?.message || 'Could not save name.'); }
+        setSaving(false);
+      };
+
+      return (
+        <>
+          {members.map((m, i) => (
+            <div key={m.id} className="border-t border-parchment first:border-0">
+              {editingId === m.id ? (
+                <div className="px-4 py-3 space-y-2">
+                  <input autoFocus value={editName} onChange={e => setEditName(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') saveEdit(m); if (e.key === 'Escape') cancelEdit(); }}
+                    className="w-full px-3 py-2 bg-white border border-gold/40 rounded-xl text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
+                  {editErr && <p className="text-xs text-rose">{editErr}</p>}
+                  <div className="flex gap-2">
+                    <Btn variant="outline" sm full onClick={cancelEdit}>Cancel</Btn>
+                    <Btn variant="gold" sm full loading={saving} onClick={() => saveEdit(m)}>Save</Btn>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3 px-4 py-3">
+                  <Avatar name={m.name} idx={i} />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-ink truncate">{m.name}</p>
+                    {m.email && <p className="text-xs text-muted truncate">{m.email}</p>}
+                  </div>
+                  {m.user_id
+                    ? <span className="text-xs font-semibold text-moss bg-moss-light px-2 py-0.5 rounded-full">Active</span>
+                    : <span className="text-xs text-muted bg-parchment px-2 py-0.5 rounded-full">{m.email ? 'Invited' : 'Offline'}</span>
+                  }
+                  {m.user_id === user.id && (
+                    <button onClick={() => startEdit(m)}
+                      className="text-muted hover:text-ink transition ml-1" title="Edit your name">
+                      <i className="fa-solid fa-pen text-xs" />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </>
+      );
+    }
+
     function PeopleTab({ trip, members, user, onRefresh }) {
       const [showForm, setForm]   = useState(false);
       const [name, setName]       = useState('');
@@ -1458,20 +1610,7 @@
               </div>
             )}
 
-            {members.map((m, i) => (
-              <div key={m.id} className="flex items-center gap-3 px-4 py-3 border-t border-parchment first:border-0">
-                <Avatar name={m.name} idx={i} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-ink truncate">{m.name}</p>
-                  {m.email && <p className="text-xs text-muted truncate">{m.email}</p>}
-                </div>
-                {m.user_id
-                  ? <span className="text-xs font-semibold text-moss bg-moss-light px-2 py-0.5 rounded-full">Active</span>
-                  : <span className="text-xs text-muted bg-parchment px-2 py-0.5 rounded-full">{m.email ? 'Invited' : 'Offline'}</span>
-                }
-                {m.user_id === user.id && <span className="text-xs font-bold text-gold">You</span>}
-              </div>
-            ))}
+            <MemberListWithEdit members={members} user={user} onRefresh={onRefresh} />
           </div>
 
           {/* Invite instructions */}
@@ -1487,6 +1626,43 @@
             </div>
           </div>
         </div>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
+    // ✏️  EDIT TRIP MODAL
+    // ══════════════════════════════════════════════════
+    function EditTripModal({ trip, onSaved, onClose }) {
+      const [name, setName]   = useState(trip.name);
+      const [desc, setDesc]   = useState(trip.description || '');
+      const [curr, setCurr]   = useState(trip.base_currency);
+      const [err, setErr]     = useState('');
+      const [loading, setLoad] = useState(false);
+
+      const submit = async () => {
+        if (!name.trim()) { setErr('Trip name is required.'); return; }
+        setErr(''); setLoad(true);
+        try {
+          await updateTrip(trip.id, { name: name.trim(), description: desc.trim(), base_currency: curr });
+          onSaved({ ...trip, name: name.trim(), description: desc.trim(), base_currency: curr });
+        } catch(e) { setErr(e?.message || 'Could not save trip.'); setLoad(false); }
+      };
+
+      return (
+        <Modal title="Edit Trip" onClose={onClose}>
+          <div className="space-y-4">
+            <TextInput label="Trip name *" value={name} onChange={e => setName(e.target.value)} />
+            <TextInput label="Description" value={desc} onChange={e => setDesc(e.target.value)} />
+            <SelectInput label="Settlement currency" value={curr} onChange={e => setCurr(e.target.value)}>
+              {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+            </SelectInput>
+            {err && <Toast message={err} />}
+            <div className="flex gap-2 pt-1">
+              <Btn variant="outline" full onClick={onClose}>Cancel</Btn>
+              <Btn variant="gold" full loading={loading} onClick={submit}>Save Changes</Btn>
+            </div>
+          </div>
+        </Modal>
       );
     }
 
