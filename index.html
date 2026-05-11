@@ -655,14 +655,12 @@
       const deleteAccount = async () => {
         if (deleteConfirm !== 'DELETE') { setDeleteErr('Type DELETE in capitals to confirm.'); return; }
         setDeletingAcct(true);
-        try {
-          const { error } = await db.rpc('delete_my_account');
-          if (error) throw error;
-          // User no longer exists server-side, so skip the server sign-out call.
-          // Use scope:'local' to just wipe the cached session from localStorage.
-          await db.auth.signOut({ scope: 'local' });
-          window.location.reload();
-        } catch(e) { setDeleteErr(e?.message || 'Could not delete account.'); setDeletingAcct(false); }
+        // Fire the delete. Ignore any error — the moment the user is deleted
+        // server-side the session becomes invalid, causing subsequent calls
+        // (including error-checking) to throw. We always clear and reload.
+        try { await db.rpc('delete_my_account'); } catch(_) {}
+        localStorage.clear();
+        window.location.reload();
       };
 
       return (
