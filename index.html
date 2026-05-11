@@ -113,6 +113,12 @@
       }
     });
 
+    // Wake up Supabase free-tier instance immediately on page load,
+    // before auth check runs — reduces cold-start delay significantly
+    fetch(`${SUPABASE_URL}/rest/v1/`, {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` }
+    }).catch(() => {});
+
     // ══════════════════════════════════════════════════
     // 💱  CURRENCIES  (supported by frankfurter.app)
     // ══════════════════════════════════════════════════
@@ -619,13 +625,144 @@
     }
 
     // ══════════════════════════════════════════════════
+    // 👤  ACCOUNT MODAL
+    // ══════════════════════════════════════════════════
+    function AccountModal({ user, onClose }) {
+      const [section, setSection] = useState('menu'); // menu | password | delete
+      const [newPass, setNewPass]     = useState('');
+      const [confirmPass, setConfirm] = useState('');
+      const [passErr, setPassErr]     = useState('');
+      const [passOk, setPassOk]       = useState('');
+      const [savingPass, setSavingPass] = useState(false);
+      const [deleteConfirm, setDeleteConfirm] = useState('');
+      const [deletingAcct, setDeletingAcct]   = useState(false);
+      const [deleteErr, setDeleteErr] = useState('');
+
+      const changePassword = async () => {
+        setPassErr(''); setPassOk('');
+        if (newPass.length < 6)          { setPassErr('Password must be at least 6 characters.'); return; }
+        if (newPass !== confirmPass)      { setPassErr('Passwords do not match.'); return; }
+        setSavingPass(true);
+        try {
+          const { error } = await db.auth.updateUser({ password: newPass });
+          if (error) throw error;
+          setPassOk('Password updated successfully.');
+          setNewPass(''); setConfirm('');
+        } catch(e) { setPassErr(e?.message || 'Could not update password.'); }
+        setSavingPass(false);
+      };
+
+      const deleteAccount = async () => {
+        if (deleteConfirm !== 'DELETE') { setDeleteErr('Type DELETE in capitals to confirm.'); return; }
+        setDeletingAcct(true);
+        try {
+          const { error } = await db.rpc('delete_my_account');
+          if (error) throw error;
+          await db.auth.signOut();
+          window.location.reload();
+        } catch(e) { setDeleteErr(e?.message || 'Could not delete account.'); setDeletingAcct(false); }
+      };
+
+      return (
+        <Modal title="Account" onClose={onClose}>
+          {section === 'menu' && (
+            <div className="space-y-2">
+              <p className="text-xs text-muted mb-4">{user.email}</p>
+              <button onClick={() => setSection('password')}
+                className="w-full flex items-center gap-3 p-3 bg-parchment rounded-xl hover:bg-ink/8 transition text-left">
+                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i className="fa-solid fa-lock text-gold text-xs" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-ink">Change password</p>
+                  <p className="text-xs text-muted">Update your login password</p>
+                </div>
+                <i className="fa-solid fa-chevron-right text-muted text-xs ml-auto" />
+              </button>
+              <button onClick={() => setSection('delete')}
+                className="w-full flex items-center gap-3 p-3 bg-parchment rounded-xl hover:bg-rose/10 transition text-left">
+                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i className="fa-solid fa-user-minus text-rose text-xs" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-rose">Delete account</p>
+                  <p className="text-xs text-muted">Permanently remove your account</p>
+                </div>
+                <i className="fa-solid fa-chevron-right text-muted text-xs ml-auto" />
+              </button>
+            </div>
+          )}
+
+          {section === 'password' && (
+            <div className="space-y-4">
+              <button onClick={() => setSection('menu')} className="flex items-center gap-1.5 text-xs text-muted hover:text-ink transition mb-1">
+                <i className="fa-solid fa-arrow-left" /> Back
+              </button>
+              <TextInput label="New password" type="password" placeholder="Min. 6 characters"
+                value={newPass} onChange={e => setNewPass(e.target.value)} />
+              <TextInput label="Confirm new password" type="password" placeholder="Repeat password"
+                value={confirmPass} onChange={e => setConfirm(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && changePassword()} />
+              {passErr && <Toast message={passErr} />}
+              {passOk  && <Toast message={passOk} type="success" />}
+              <Btn variant="gold" full loading={savingPass} onClick={changePassword}>
+                Update Password
+              </Btn>
+            </div>
+          )}
+
+          {section === 'delete' && (
+            <div className="space-y-4">
+              <button onClick={() => setSection('menu')} className="flex items-center gap-1.5 text-xs text-muted hover:text-ink transition mb-1">
+                <i className="fa-solid fa-arrow-left" /> Back
+              </button>
+              <div className="bg-rose-light border border-rose/20 rounded-xl p-4">
+                <p className="text-sm font-semibold text-ink mb-1">This cannot be undone</p>
+                <p className="text-xs text-muted leading-relaxed">
+                  Your account will be permanently deleted. Your name will remain on any shared trips and expenses, but you'll be logged out and your email can be used to create a new account.
+                </p>
+              </div>
+              <Field label='Type DELETE to confirm'>
+                <input value={deleteConfirm} onChange={e => setDeleteConfirm(e.target.value)}
+                  placeholder="DELETE"
+                  className={inputCls} />
+              </Field>
+              {deleteErr && <Toast message={deleteErr} />}
+              <Btn variant="danger" full loading={deletingAcct} onClick={deleteAccount}>
+                Permanently Delete My Account
+              </Btn>
+            </div>
+          )}
+        </Modal>
+      );
+    }
+
+    // ══════════════════════════════════════════════════
     // 🗺️  TRIPS LIST
     // ══════════════════════════════════════════════════
-    function TripsView({ user, profile, onSelectTrip }) {
-      const [trips, setTrips]       = useState([]);
-      const [loading, setLoading]   = useState(true);
+    function TripsView({ user, profile: initialProfile, onSelectTrip }) {
+      const [trips, setTrips]         = useState([]);
+      const [loading, setLoading]     = useState(true);
       const [loadError, setLoadError] = useState('');
-      const [showCreate, setCreate] = useState(false);
+      const [showCreate, setCreate]   = useState(false);
+      const [profile, setProfile]     = useState(initialProfile);
+      const [editingName, setEditingName] = useState(false);
+      const [editName, setEditName]   = useState('');
+      const [savingName, setSavingName] = useState(false);
+
+      const [showAccount, setShowAccount] = useState(false);
+      const startEditName = () => { setEditName(profile?.name || ''); setEditingName(true); };
+      const cancelEditName = () => setEditingName(false);
+      const saveNameChange = async () => {
+        if (!editName.trim()) return;
+        setSavingName(true);
+        try {
+          await updateProfileName(user.id, editName.trim());
+          setProfile(p => ({ ...p, name: editName.trim() }));
+          setEditingName(false);
+        } catch(e) { alert(e?.message || 'Could not save name.'); }
+        setSavingName(false);
+      };
 
       const load = useCallback(async () => {
         setLoading(true);
@@ -653,8 +790,35 @@
                 </div>
                 <span className="font-bold tracking-tight">SplitTrip</span>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-cream/50 hidden sm:block">{profile?.name || user.email}</span>
+              <div className="flex items-center gap-2">
+                {editingName ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      autoFocus
+                      value={editName}
+                      onChange={e => setEditName(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') saveNameChange(); if (e.key === 'Escape') cancelEditName(); }}
+                      className="w-28 px-2 py-1 bg-cream/10 border border-cream/20 rounded-lg text-xs text-cream focus:outline-none focus:border-gold/60"
+                    />
+                    <button onClick={saveNameChange} disabled={savingName}
+                      className="text-gold hover:text-gold-light transition text-xs disabled:opacity-50">
+                      {savingName ? <Spinner /> : <i className="fa-solid fa-check" />}
+                    </button>
+                    <button onClick={cancelEditName} className="text-cream/40 hover:text-cream transition text-xs">
+                      <i className="fa-solid fa-xmark" />
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={startEditName}
+                    className="hidden sm:flex items-center gap-1.5 text-xs text-cream/50 hover:text-cream transition group">
+                    <span>{profile?.name || user.email}</span>
+                    <i className="fa-solid fa-pen text-cream/20 group-hover:text-cream/60 transition text-xs" />
+                  </button>
+                )}
+                <button onClick={() => setShowAccount(true)}
+                  className="text-cream/50 hover:text-cream transition text-sm" title="Account settings">
+                  <i className="fa-solid fa-gear" />
+                </button>
                 <button onClick={async () => {
                     await db.auth.signOut();
                     window.location.reload();
@@ -665,6 +829,9 @@
               </div>
             </div>
           </div>
+          {showAccount && (
+            <AccountModal user={user} onClose={() => setShowAccount(false)} />
+          )}
 
           <div className="max-w-lg mx-auto px-4 py-6">
             <div className="flex items-start justify-between mb-5">
@@ -868,6 +1035,12 @@
             fetchTripMembers(trip.id),
             fetchExpenses(trip.id),
           ]);
+          // Check the current user is actually a member of this trip
+          const isMember = m.some(member => member.user_id === user.id) || trip.created_by === user.id;
+          if (!isMember) {
+            setLoadError('not_a_member');
+            return;
+          }
           setMembers(m);
           setExpenses(e);
         } catch (e) {
@@ -951,6 +1124,17 @@
           <div className="flex-1 max-w-lg mx-auto w-full px-4 py-5">
             {loading ? (
               <div className="flex justify-center pt-16"><Spinner dark /></div>
+            ) : loadError === 'not_a_member' ? (
+              <div className="text-center py-16 bg-white rounded-2xl border border-ink/8 mt-4 fade-up">
+                <div className="w-14 h-14 bg-parchment rounded-2xl flex items-center justify-center mx-auto mb-4">
+                  <i className="fa-solid fa-lock text-gold text-xl" />
+                </div>
+                <p className="font-bold text-ink text-base">You're not on this trip</p>
+                <p className="text-sm text-muted mt-2 mb-5 px-6 leading-relaxed">
+                  Ask the trip creator to add your email address, then sign out and back in.
+                </p>
+                <Btn variant="ghost" onClick={onBack}>Back to my trips</Btn>
+              </div>
             ) : loadError ? (
               <div className="text-center py-14 bg-white rounded-2xl border border-rose/20 mt-4 fade-up">
                 <i className="fa-solid fa-triangle-exclamation text-2xl text-rose mb-3" />
@@ -1038,6 +1222,7 @@
                     {dayExps.map(exp => (
                       <ExpenseCard key={exp.id} expense={exp}
                         memberName={memberName} memberIdx={memberIdx}
+                        members={members}
                         userId={user.id}
                         onEdit={() => setEdit(exp)}
                         onDelete={() => handleDelete(exp.id)}
@@ -1076,11 +1261,12 @@
       );
     }
 
-    function ExpenseCard({ expense, memberName, memberIdx, userId, onEdit, onDelete, onConfirmDelete, onCancelDelete, onConfirm, deleting }) {
+    function ExpenseCard({ expense, memberName, memberIdx, members, userId, onEdit, onDelete, onConfirmDelete, onCancelDelete, onConfirm, deleting }) {
       const isOwner = expense.created_by === userId;
       const [open, setOpen] = useState(false);
       const payer = memberName(expense.paid_by_member_id);
       const payerIdx = memberIdx(expense.paid_by_member_id);
+      const addedBy = (members || []).find(m => m.user_id === expense.created_by)?.name || null;
 
       return (
         <div className="bg-white rounded-2xl border border-ink/8 overflow-hidden transition-all">
@@ -1088,8 +1274,9 @@
             <div className="flex items-center gap-3">
               <Avatar name={payer} idx={payerIdx} />
               <div className="flex-1 min-w-0">
-                <p className="font-semibold text-ink truncate text-sm">{expense.description}</p>
+                <p className="font-bold text-ink truncate">{expense.description}</p>
                 <p className="text-xs text-muted mt-0.5">{payer} paid · {fmtDate(expense.date)}</p>
+                {addedBy && <p className="text-xs text-muted/60 mt-0.5">Added by {addedBy}</p>}
               </div>
               <div className="text-right">
                 <p className="font-bold text-ink">{fmt(expense.amount, expense.currency)}</p>
