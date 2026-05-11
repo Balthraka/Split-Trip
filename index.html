@@ -1698,14 +1698,12 @@
                             setEqSet(s);
                           }} className="w-4 h-4" />
                         <Avatar name={m.name} idx={i} size="sm" />
-                        <div className="flex-1 min-w-0">
-                          <span className="text-sm text-ink font-medium block truncate">{m.name}</span>
-                          {total > 0 && equalSet.has(m.id) && equalAmounts[m.id] !== undefined && (
-                            <span className="text-xs text-muted font-semibold">
-                              {fmt(equalAmounts[m.id], currency)}
-                            </span>
-                          )}
-                        </div>
+                        <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
+                        {total > 0 && equalSet.has(m.id) && equalAmounts[m.id] !== undefined && (
+                          <span className="text-xs text-muted font-semibold flex-shrink-0">
+                            {fmt(equalAmounts[m.id], currency)}
+                          </span>
+                        )}
                       </label>
                     ))}
                   </div>
