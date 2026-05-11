@@ -102,7 +102,7 @@
     // ══════════════════════════════════════════════════
     const SUPABASE_URL      = 'https://ijpdgjryrwkrirtvrcoj.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlqcGRnanJ5cndrcmlydHZyY29qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg0MDk5OTUsImV4cCI6MjA5Mzk4NTk5NX0.-ydS5bd_THbKKfdy8E4dzTAs7sZdKpytwIi1S0JLQ2E';
-    
+
     // ══════════════════════════════════════════════════
     // 🔌  SUPABASE CLIENT
     // ══════════════════════════════════════════════════
@@ -130,17 +130,18 @@
 
     async function getRate(from, to, date) {
       if (from === to) return 1;
-      const key = `${from}→${to}@${date}`;
+      // Use 'latest' for today to avoid weekend/holiday gaps
+      const today = new Date().toISOString().split('T')[0];
+      const apiDate = date >= today ? 'latest' : date;
+      const key = `${from}→${to}@${apiDate}`;
       if (_ratesCache[key] !== undefined) return _ratesCache[key];
-      try {
-        const res  = await fetch(`https://api.frankfurter.app/${date}?from=${from}&to=${to}`);
-        const data = await res.json();
-        const rate = data.rates?.[to] ?? 1;
-        _ratesCache[key] = rate;
-        return rate;
-      } catch {
-        return 1; // safe fallback if API unreachable
-      }
+      const res = await fetch(`https://api.frankfurter.app/${apiDate}?from=${from}&to=${to}`);
+      if (!res.ok) throw new Error(`Rate API error: ${res.status}`);
+      const data = await res.json();
+      const rate = data.rates?.[to];
+      if (!rate) throw new Error(`No rate found for ${from}→${to}`);
+      _ratesCache[key] = rate;
+      return rate;
     }
 
     // ══════════════════════════════════════════════════
@@ -152,7 +153,12 @@
       members.forEach(m => { balances[m.id] = 0; });
 
       for (const exp of expenses) {
-        const rate = await getRate(exp.currency, baseCurrency, exp.date);
+        let rate;
+        try {
+          rate = await getRate(exp.currency, baseCurrency, exp.date);
+        } catch(e) {
+          throw new Error(`Could not fetch exchange rate for ${exp.currency}→${baseCurrency}: ${e.message}`);
+        }
         if (balances[exp.paid_by_member_id] !== undefined) {
           balances[exp.paid_by_member_id] += exp.amount * rate;
         }
@@ -228,13 +234,25 @@
     }
 
     async function fetchExpenses(tripId) {
-      const { data } = await db
+      const { data: expenses, error } = await db
         .from('expenses')
-        .select('*, expense_splits(*)')
+        .select('*')
         .eq('trip_id', tripId)
         .order('date', { ascending: false })
         .order('created_at', { ascending: false });
-      return data || [];
+      if (error) throw error;
+      if (!expenses?.length) return [];
+
+      // Fetch splits separately to avoid RLS issues with nested selects
+      const { data: splits } = await db
+        .from('expense_splits')
+        .select('*')
+        .in('expense_id', expenses.map(e => e.id));
+
+      return expenses.map(e => ({
+        ...e,
+        expense_splits: (splits || []).filter(s => s.expense_id === e.id),
+      }));
     }
 
     async function createTrip(name, description, baseCurrency, createdBy, members) {
@@ -282,6 +300,9 @@
     }
 
     async function removeExpense(expenseId) {
+      // Delete splits first, then expense
+      const { error: se } = await db.from('expense_splits').delete().eq('expense_id', expenseId);
+      if (se) throw se;
       const { error } = await db.from('expenses').delete().eq('id', expenseId);
       if (error) throw error;
     }
@@ -888,17 +909,16 @@
     // ══════════════════════════════════════════════════
     function ExpensesTab({ trip, members, expenses, user, onRefresh }) {
       const [showAdd, setAdd]  = useState(false);
-      const [deleting, setDel] = useState(null);
+      const [deleting, setDel]   = useState(null);
+      const [confirmDel, setConf] = useState(null);
 
       const memberIdx  = (id) => members.findIndex(m => m.id === id);
       const memberName = (id) => members.find(m => m.id === id)?.name || 'Unknown';
 
       const handleDelete = async (id) => {
-        if (!window.confirm('Delete this expense? This cannot be undone.')) return;
-        setDel(id);
+        setDel(id); setConf(null);
         try { await removeExpense(id); await onRefresh(); }
-        catch (e) { alert('Delete failed: ' + (e?.message || 'Unknown error')); }
-        setDel(null);
+        catch (e) { alert('Delete failed: ' + (e?.message || 'Unknown error')); setDel(null); }
       };
 
       // Group by date
@@ -952,6 +972,9 @@
                       <ExpenseCard key={exp.id} expense={exp}
                         memberName={memberName} memberIdx={memberIdx}
                         onDelete={() => handleDelete(exp.id)}
+                        onConfirmDelete={() => setConf(exp.id)}
+                        onCancelDelete={() => setConf(null)}
+                        onConfirm={confirmDel === exp.id}
                         deleting={deleting === exp.id} />
                     ))}
                   </div>
@@ -978,7 +1001,7 @@
       );
     }
 
-    function ExpenseCard({ expense, memberName, memberIdx, onDelete, deleting }) {
+    function ExpenseCard({ expense, memberName, memberIdx, onDelete, onConfirmDelete, onCancelDelete, onConfirm, deleting }) {
       const [open, setOpen] = useState(false);
       const payer = memberName(expense.paid_by_member_id);
       const payerIdx = memberIdx(expense.paid_by_member_id);
@@ -1013,11 +1036,21 @@
                 ))}
               </div>
               <div className="mt-3 pt-3 border-t border-parchment flex justify-end">
-                <button onClick={onDelete} disabled={deleting}
-                  className="flex items-center gap-1.5 text-xs text-rose hover:text-rose/70 transition disabled:opacity-50">
-                  {deleting ? <Spinner /> : <i className="fa-solid fa-trash-can" />}
-                  Delete expense
-                </button>
+                {onConfirm ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted">Sure?</span>
+                    <button onClick={onDelete} disabled={deleting}
+                      className="text-xs font-semibold text-rose hover:text-rose/70 transition disabled:opacity-50 flex items-center gap-1">
+                      {deleting ? <Spinner /> : null} Yes, delete
+                    </button>
+                    <button onClick={onCancelDelete} className="text-xs text-muted hover:text-ink transition">Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={onConfirmDelete} disabled={deleting}
+                    className="flex items-center gap-1.5 text-xs text-rose/60 hover:text-rose transition disabled:opacity-50">
+                    <i className="fa-solid fa-trash-can" /> Delete expense
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1251,12 +1284,20 @@
       const memberName = (id) => members.find(m => m.id === id)?.name || 'Unknown';
       const memberIdx  = (id) => members.findIndex(m => m.id === id);
 
+      const [rateError, setRateError] = useState('');
+
       const compute = useCallback(async () => {
         if (!members.length) return;
         setCalc(true);
-        const r = await computeSettlements(expenses, members, currency);
-        setResult(r);
-        setCalc(false);
+        setRateError('');
+        try {
+          const r = await computeSettlements(expenses, members, currency);
+          setResult(r);
+        } catch(e) {
+          setRateError(e.message || 'Could not fetch exchange rates.');
+        } finally {
+          setCalc(false);
+        }
       }, [expenses, members, currency]);
 
       useEffect(() => { compute(); }, [compute]);
@@ -1281,6 +1322,19 @@
             <div className="text-center py-12">
               <div className="mb-3"><Spinner dark /></div>
               <p className="text-xs text-muted">Fetching exchange rates…</p>
+            </div>
+          ) : rateError ? (
+            <div className="bg-rose-light border border-rose/20 rounded-2xl p-4">
+              <div className="flex gap-3 items-start">
+                <i className="fa-solid fa-triangle-exclamation text-rose mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-ink">Exchange rate error</p>
+                  <p className="text-xs text-muted mt-1">{rateError}</p>
+                  <button onClick={compute} className="text-xs font-semibold text-rose hover:text-rose/70 mt-2 transition">
+                    Try again
+                  </button>
+                </div>
+              </div>
             </div>
           ) : result ? (
             <>
