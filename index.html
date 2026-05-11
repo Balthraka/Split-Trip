@@ -1430,12 +1430,12 @@
         if (isEdit && editExpense?.expense_splits?.length && editExpense.amount > 0) {
           const base = Object.fromEntries(members.map(m => [m.id, '0']));
           editExpense.expense_splits.forEach(s => {
-            const pct = Math.round(s.amount / editExpense.amount * 1000) / 10;
+            const pct = Math.round(s.amount / editExpense.amount * 10000) / 100;
             base[s.member_id] = String(pct);
           });
           return base;
         }
-        return Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(1)]));
+        return Object.fromEntries(members.map(m => [m.id, (100 / members.length).toFixed(2)]));
       });
       const [exacts, setExacts]   = useState(() => {
         if (isEdit) {
@@ -1505,7 +1505,7 @@
               (s, om) => s + (parseFloat(newPercs[om.id]) || 0), 0
             );
             newPercs[m.id] = String(
-              Math.round((isLast ? remaining - soFar : perBelow) * 10) / 10
+              Math.round((isLast ? remaining - soFar : perBelow) * 100) / 100
             );
           });
         }
@@ -1538,14 +1538,27 @@
         if (splitType === 'equal') {
           const inc = members.filter(m => equalSet.has(m.id));
           if (!inc.length) return null;
-          const share = total / inc.length;
-          return inc.map(m => ({ memberId: m.id, amount: Math.round(share * 100) / 100 }));
+          const share = Math.floor(total / inc.length * 100) / 100;
+          let running = 0;
+          return inc.map((m, i) => {
+            const isLast = i === inc.length - 1;
+            const amt = isLast ? Math.round((total - running) * 100) / 100 : share;
+            running += amt;
+            return { memberId: m.id, amount: amt };
+          });
         }
         if (splitType === 'percent') {
-          if (Math.abs(pctTotal - 100) > 0.5) return null;
-          return members
-            .map(m => ({ memberId: m.id, amount: Math.round(total * (parseFloat(percents[m.id]) || 0) / 100 * 100) / 100 }))
-            .filter(s => s.amount > 0);
+          if (Math.abs(pctTotal - 100) > 0.1) return null;
+          const pctRows = members.filter(m => (parseFloat(percents[m.id]) || 0) > 0);
+          let running = 0;
+          return pctRows.map((m, i) => {
+            const isLast = i === pctRows.length - 1;
+            const amt = isLast
+              ? Math.round((total - running) * 100) / 100
+              : Math.round(total * (parseFloat(percents[m.id]) || 0) / 100 * 100) / 100;
+            running += amt;
+            return { memberId: m.id, amount: amt };
+          });
         }
         if (splitType === 'exact') {
           const rows = members
@@ -1567,7 +1580,7 @@
         const splits = buildSplits();
         if (!splits) {
           if (splitType === 'equal')   { setErr('Select at least one person.'); return; }
-          if (splitType === 'percent') { setErr(`Percentages must sum to 100% — currently ${pctTotal.toFixed(1)}%`); return; }
+          if (splitType === 'percent') { setErr(`Percentages must sum to 100% — currently ${pctTotal.toFixed(2)}%`); return; }
           if (splitType === 'exact')   { setErr('Enter amounts for at least one person.'); return; }
         }
         setLoad(true);
@@ -1673,14 +1686,14 @@
                 {/* Percentage */}
                 {splitType === 'percent' && (
                   <div className="space-y-2">
-                    <div className={`text-right text-xs font-bold ${Math.abs(pctTotal - 100) > 0.5 ? 'text-rose' : 'text-moss'}`}>
-                      {pctTotal.toFixed(1)}% / 100%
+                    <div className={`text-right text-xs font-bold ${Math.abs(pctTotal - 100) > 0.1 ? 'text-rose' : 'text-moss'}`}>
+                      {pctTotal.toFixed(2)}% / 100%
                     </div>
                     {members.map((m, i) => (
                       <div key={m.id} className="flex items-center gap-2">
                         <Avatar name={m.name} idx={i} size="sm" />
                         <span className="text-sm text-ink flex-1 font-medium">{m.name}</span>
-                        <input type="number" value={percents[m.id]} min="0" max="100" step="1"
+                        <input type="number" value={percents[m.id]} min="0" max="100" step="0.01"
                           onChange={e => handlePercentChange(m.id, e.target.value)}
                           className="w-16 px-2 py-1.5 bg-white border border-ink/12 rounded-lg text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-gold/40" />
                         <span className="text-xs text-muted w-4">%</span>
