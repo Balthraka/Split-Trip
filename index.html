@@ -1205,10 +1205,10 @@
                     <i className="fa-solid fa-receipt text-white text-sm" />
                   </div>
                 </button>
-                <div className="flex-1 min-w-0">
+                <button onClick={load} className="flex-1 min-w-0 text-left hover:opacity-80 transition active:scale-95">
                   <h1 className="font-bold truncate tracking-tight">{trip.name}</h1>
                   <p className="text-xs text-cream/40 mt-0.5">{members.length} people · {trip.base_currency}</p>
-                </div>
+                </button>
                 {isCreator && (
                   <div className="flex items-center gap-1">
                     <button onClick={() => setEditTrip(true)}
