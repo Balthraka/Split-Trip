@@ -1402,6 +1402,34 @@
       const payerIdx = memberIdx(expense.paid_by_member_id);
       const addedBy = (members || []).find(m => m.user_id === expense.created_by)?.name || null;
 
+      // Compute a short split summary for the collapsed card view
+      const splitSummary = useMemo(() => {
+        const splits = expense.expense_splits || [];
+        if (!splits.length) return null;
+        const totalMembers = (members || []).length;
+
+        // Single person owes all
+        if (splits.length === 1) {
+          const name = memberName(splits[0].member_id);
+          return name === payer ? 'Paid for themselves' : `${name} owes all`;
+        }
+
+        // Detect equal split (all amounts within 2 cents of each other)
+        const amounts = splits.map(s => s.amount);
+        const min = Math.min(...amounts), max = Math.max(...amounts);
+        const isEqual = (max - min) <= 0.02;
+
+        // Who's in the split
+        const names = splits.map(s => memberName(s.member_id));
+        const isAll = splits.length === totalMembers;
+        const whoStr = isAll ? 'everyone' :
+          names.length <= 3 ? names.join(', ') :
+          `${names.slice(0, 2).join(', ')} +${names.length - 2}`;
+
+        if (isEqual) return `Split equally · ${whoStr}`;
+        return `Custom split · ${whoStr}`;
+      }, [expense.expense_splits, members, payer]);
+
       return (
         <div className="bg-white rounded-2xl border border-ink/8 overflow-hidden transition-all">
           <button onClick={() => setOpen(!open)} className="w-full text-left p-4">
@@ -1410,7 +1438,8 @@
               <div className="flex-1 min-w-0">
                 <p className="font-bold text-ink truncate">{expense.description}</p>
                 <p className="text-xs text-muted mt-0.5">{payer} paid · {fmtDate(expense.date)}</p>
-                {addedBy && <p className="text-xs text-muted/60 mt-0.5">Added by {addedBy}</p>}
+                {splitSummary && <p className="text-xs text-muted/70 mt-0.5">{splitSummary}</p>}
+                {addedBy && <p className="text-xs text-muted/40 mt-0.5">Added by {addedBy}</p>}
               </div>
               <div className="text-right">
                 <p className="font-bold text-ink">{fmt(expense.amount, expense.currency)}</p>
@@ -1483,14 +1512,16 @@
       const [currency, setCurr]   = useState(editExpense?.currency || trip.expense_currency || trip.base_currency);
       const [date, setDate]       = useState(editExpense?.date || todayISO());
       const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
-      const [splitType, setSplitRaw] = useState(isEdit ? 'percent' : 'equal');
+      const [splitType, setSplitRaw] = useState('equal');
       const setSplit = (type) => {
-        // When switching to exact, pre-fill equally if exacts are all empty
+        // When switching to exact, pre-fill from current equal split selection
         if (type === 'exact' && total > 0) {
           const hasValues = Object.values(exacts).some(v => parseFloat(String(v).replace(/,/g,'')) > 0);
           if (!hasValues) {
-            const share = Math.round(total / members.length * 100) / 100;
-            const ids = members.map(m => m.id);
+            const inc = members.filter(m => equalSet.has(m.id));
+            const denom = inc.length || members.length;
+            const share = Math.floor(total / denom * 100) / 100;
+            const ids = (inc.length ? inc : members).map(m => m.id);
             const newEx = {};
             let running = 0;
             ids.forEach((id, i) => {
@@ -1501,12 +1532,36 @@
                 running += share;
               }
             });
+            // Zero out members not in selection
+            members.forEach(m => { if (!newEx[m.id]) newEx[m.id] = '0'; });
             setExacts(newEx);
+          }
+        }
+        // When switching to percent, pre-fill from equalSet if all zero
+        if (type === 'percent' && total > 0) {
+          const hasValues = Object.values(percents).some(v => parseFloat(v) > 0 && parseFloat(v) < 100);
+          if (!hasValues) {
+            const inc = members.filter(m => equalSet.has(m.id));
+            const denom = inc.length || members.length;
+            const share = Math.round(100 / denom * 100) / 100;
+            const newP = {};
+            members.forEach(m => { newP[m.id] = '0'; });
+            inc.forEach((m, i) => {
+              newP[m.id] = i === inc.length - 1
+                ? String(Math.round((100 - share * (inc.length - 1)) * 100) / 100)
+                : String(share);
+            });
+            setPercs(newP);
           }
         }
         setSplitRaw(type);
       };
-      const [equalSet, setEqSet]  = useState(() => new Set(members.map(m => m.id)));
+      const [equalSet, setEqSet]  = useState(() => {
+        if (isEdit && editExpense?.expense_splits?.length) {
+          return new Set(editExpense.expense_splits.map(s => s.member_id));
+        }
+        return new Set(members.map(m => m.id));
+      });
       const [percents, setPercs]  = useState(() => {
         if (isEdit && editExpense?.expense_splits?.length && editExpense.amount > 0) {
           const base = Object.fromEntries(members.map(m => [m.id, '0']));
