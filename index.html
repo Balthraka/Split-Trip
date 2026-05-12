@@ -1438,8 +1438,8 @@
               <div className="flex-1 min-w-0">
                 <p className="font-bold text-ink truncate">{expense.description}</p>
                 <p className="text-xs text-muted mt-0.5">{payer} paid · {fmtDate(expense.date)}</p>
-                {splitSummary && <p className="text-xs text-muted/70 mt-0.5">{splitSummary}</p>}
-                {addedBy && <p className="text-xs text-muted/40 mt-0.5">Added by {addedBy}</p>}
+                {splitSummary && <p className="text-xs text-muted/85 mt-0.5">{splitSummary}</p>}
+                {addedBy && <p className="text-xs text-muted/65 mt-0.5">Added by {addedBy}</p>}
               </div>
               <div className="text-right">
                 <p className="font-bold text-ink">{fmt(expense.amount, expense.currency)}</p>
@@ -1512,7 +1512,26 @@
       const [currency, setCurr]   = useState(editExpense?.currency || trip.expense_currency || trip.base_currency);
       const [date, setDate]       = useState(editExpense?.date || todayISO());
       const [paidBy, setPaid]     = useState(editExpense?.paid_by_member_id || (() => { const me = members.find(m => m.user_id === user.id); return me?.id || members[0]?.id || ''; })());
-      const [splitType, setSplitRaw] = useState('equal');
+      const [splitType, setSplitRaw] = useState(() => {
+        if (!isEdit || !editExpense) return 'equal';
+        // Use stored split_type if available
+        if (editExpense.split_type) return editExpense.split_type;
+        // Fallback: detect from amounts for expenses saved before this feature
+        const splits = editExpense.expense_splits || [];
+        if (!splits.length) return 'equal';
+        if (splits.length === 1) return 'single';
+        const amounts = splits.map(s => s.amount);
+        const min = Math.min(...amounts), max = Math.max(...amounts);
+        if (max - min <= 0.02) return 'equal';
+        if (editExpense.amount > 0) {
+          const allPct = splits.every(s => {
+            const pct = s.amount / editExpense.amount * 100;
+            return Math.abs(pct - Math.round(pct * 100) / 100) < 0.1;
+          });
+          if (allPct) return 'percent';
+        }
+        return 'exact';
+      });
       const setSplit = (type) => {
         // When switching to exact, pre-fill from current equal split selection
         if (type === 'exact' && total > 0) {
@@ -1747,12 +1766,14 @@
               paid_by_member_id: paidBy,
               amount: finalAmount, currency, date,
               description: desc.trim(),
+              split_type: splitType,
             }, splits);
           } else {
             await saveExpense(trip.id, {
               paid_by_member_id: paidBy,
               amount: finalAmount, currency, date,
               description: desc.trim(),
+              split_type: splitType,
             }, splits, user.id);
           }
           onAdded();
