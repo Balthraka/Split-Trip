@@ -909,7 +909,7 @@
           {/* Header */}
           <div className="bg-ink text-cream sticky top-0 z-20">
             <div className="max-w-lg mx-auto px-4 py-4 flex items-center justify-between">
-              <button onClick={load} className="flex items-center gap-2.5 hover:opacity-80 transition active:scale-95">
+              <button onClick={() => window.location.reload()} className="flex items-center gap-2.5 hover:opacity-80 transition active:scale-95">
                 <div className="w-8 h-8 bg-gold rounded-lg flex items-center justify-center">
                   <i className="fa-solid fa-receipt text-white text-sm" />
                 </div>
@@ -1199,7 +1199,7 @@
           <div className="bg-ink text-cream sticky top-0 z-20">
             <div className="max-w-lg mx-auto px-4">
               <div className="flex items-center gap-3 pt-4 pb-3">
-                <button onClick={onBack}
+                <button onClick={() => window.location.reload()}
                   className="flex items-center justify-center hover:opacity-80 transition active:scale-95 -ml-1">
                   <div className="w-8 h-8 bg-gold rounded-lg flex items-center justify-center">
                     <i className="fa-solid fa-receipt text-white text-sm" />
