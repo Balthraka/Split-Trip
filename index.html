@@ -128,34 +128,60 @@
     });
     setInterval(pingSupabase, 30000);
 
-    // Recreates the Supabase client — used on timeout to clear zombie connections.
-    // Refreshing the page works because it creates a new client; this does the same.
+    // Recreates the Supabase client — clears zombie connections the same way
+    // a page refresh would, without losing the user's form data.
     const makeClient = () => supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { storage: window.localStorage, detectSessionInUrl: false }
     });
 
-    // withTimeout: 3s first attempt. On timeout, recreates the client (clears
-    // zombie connections), re-pings, then retries with 5s. This means the retry
-    // button works without needing a page refresh.
+    // Full connection reset — exactly replicates what a page refresh does:
+    // 1. New Supabase client (no zombie connections)
+    // 2. getSession() — reads + refreshes auth token from localStorage
+    // 3. Pings to warm the connection
+    // AWAITED before the error message shows, so retry always works.
+    const resetConnection = async () => {
+      db = makeClient();
+      try { await db.auth.getSession(); } catch(_) {}
+      await pingSupabase();
+    };
+
+    // ── Error log — captures what Supabase actually returns on failure ──
+    // View in browser console: copy(JSON.stringify(window._errLog, null, 2))
+    window._errLog = window._errLog || [];
+    const logErr = (context, error) => {
+      const entry = {
+        time: new Date().toISOString(),
+        context,
+        message:  error?.message || String(error),
+        code:     error?.code,
+        status:   error?.status,
+        details:  error?.details,
+        hint:     error?.hint,
+        stack:    error?.stack?.split('\n').slice(0, 3).join(' | '),
+      };
+      window._errLog.push(entry);
+      if (window._errLog.length > 50) window._errLog.shift(); // cap at 50 entries
+      console.warn('[SplitTrip error]', entry);
+    };
+
+    // withTimeout: 3s limit. On timeout, AWAITS the full connection reset
+    // before throwing the error. By the time the user reads the message
+    // and taps retry, the connection is in the same state as after a refresh.
     const withTimeout = async (fn, ms = 3000) => {
-      const attempt = (timeout) => Promise.race([
-        fn(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('TIMEOUT')), timeout)
-        ),
-      ]);
       try {
-        return await attempt(ms);
+        return await Promise.race([
+          fn(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('TIMEOUT')), ms)
+          ),
+        ]);
       } catch(e) {
         if (e.message === 'TIMEOUT') {
-          // Recreate client to clear zombie connections, then warm + retry
-          db = makeClient();
-          await pingSupabase();
-          try { return await attempt(5000); }
-          catch(e2) {
-            throw new Error('Connection is slow — your data is still here. Tap the button to try again.');
-          }
+          logErr('withTimeout', { message: 'Operation timed out after 3s' });
+          await resetConnection();
+          throw new Error('Connection reset. Tap the button to try again.');
         }
+        logErr('withTimeout:unexpected', e);
         throw e;
       }
     };
@@ -319,7 +345,7 @@
         .from('trips')
         .insert({ name, description, base_currency: baseCurrency, expense_currency: expenseCurrency, created_by: createdBy })
         .select().single());
-      if (error) throw error;
+      if (error) { logErr('createTrip', error); throw error; }
 
       const rows = members.map(m => ({
         trip_id: trip.id,
@@ -346,7 +372,7 @@
         .from('expenses')
         .insert({ trip_id: tripId, ...expenseData, created_by: userId })
         .select().single());
-      if (error) throw error;
+      if (error) { logErr('saveExpense:insert', error); throw error; }
 
       const splitRows = splits.map(s => ({
         expense_id: exp.id,
@@ -354,7 +380,7 @@
         amount: s.amount,
       }));
       const { error: se } = await db.from('expense_splits').insert(splitRows);
-      if (se) throw se;
+      if (se) { logErr('saveExpense:splits', se); throw se; }
       return exp;
     }
 
@@ -367,7 +393,7 @@
 
     async function updateExpenseRecord(expenseId, expenseData, splits) {
       const { error } = await withTimeout(() => db.from('expenses').update(expenseData).eq('id', expenseId));
-      if (error) throw error;
+      if (error) { logErr('updateExpense', error); throw error; }
       const { error: de } = await db.from('expense_splits').delete().eq('expense_id', expenseId);
       if (de) throw de;
       const splitRows = splits.map(s => ({ expense_id: expenseId, member_id: s.memberId, amount: s.amount }));
@@ -382,7 +408,7 @@
 
     async function updateTrip(tripId, data) {
       const { error } = await withTimeout(() => db.from('trips').update(data).eq('id', tripId));
-      if (error) throw error;
+      if (error) { logErr('updateTrip', error); throw error; }
     }
 
     async function deleteTripById(tripId) {
@@ -393,10 +419,10 @@
     async function updateProfileName(userId, name) {
       // Update profile table
       const { error } = await withTimeout(() => db.from('profiles').update({ name }).eq('id', userId));
-      if (error) throw error;
+      if (error) { logErr('updateProfile', error); throw error; }
       // Also update all trip_members rows for this user so everyone sees the new name
       const { error: me } = await withTimeout(() => db.from('trip_members').update({ name }).eq('user_id', userId));
-      if (me) throw me;
+      if (me) { logErr('updateMemberName', me); throw me; }
     }
 
     // ══════════════════════════════════════════════════
@@ -733,6 +759,17 @@
                 </div>
                 <i className="fa-solid fa-chevron-right text-muted text-xs ml-auto" />
               </button>
+              <button onClick={() => setSection('errorlog')}
+                className="w-full flex items-center gap-3 p-3 bg-parchment rounded-xl hover:bg-ink/8 transition text-left">
+                <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center flex-shrink-0">
+                  <i className="fa-solid fa-bug text-muted text-xs" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-ink">Connection log</p>
+                  <p className="text-xs text-muted">View recent errors for debugging</p>
+                </div>
+                <i className="fa-solid fa-chevron-right text-muted text-xs ml-auto" />
+              </button>
               <button onClick={() => setSection('delete')}
                 className="w-full flex items-center gap-3 p-3 bg-parchment rounded-xl hover:bg-rose/10 transition text-left">
                 <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center flex-shrink-0">
@@ -762,6 +799,40 @@
               <Btn variant="gold" full loading={savingPass} onClick={changePassword}>
                 Update Password
               </Btn>
+            </div>
+          )}
+
+          {section === 'errorlog' && (
+            <div className="space-y-3">
+              <button onClick={() => setSection('menu')} className="flex items-center gap-1.5 text-xs text-muted hover:text-ink transition mb-1">
+                <i className="fa-solid fa-arrow-left" /> Back
+              </button>
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-semibold text-muted uppercase tracking-widest">Recent errors</p>
+                <button onClick={() => { window._errLog = []; }}
+                  className="text-xs text-muted hover:text-ink transition">Clear</button>
+              </div>
+              {(!window._errLog || window._errLog.length === 0) ? (
+                <div className="text-center py-8 bg-parchment rounded-xl">
+                  <i className="fa-solid fa-circle-check text-moss text-xl mb-2" />
+                  <p className="text-sm text-muted">No errors recorded</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-80 overflow-y-auto">
+                  {[...(window._errLog || [])].reverse().map((e, i) => (
+                    <div key={i} className="bg-parchment rounded-xl p-3 text-xs font-mono break-all">
+                      <p className="font-bold text-ink mb-1">{e.context}</p>
+                      <p className="text-rose">{e.message}</p>
+                      {e.code    && <p className="text-muted">code: {e.code}</p>}
+                      {e.status  && <p className="text-muted">status: {e.status}</p>}
+                      {e.hint    && <p className="text-muted">hint: {e.hint}</p>}
+                      {e.details && <p className="text-muted">details: {e.details}</p>}
+                      <p className="text-muted/60 mt-1">{e.time}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="text-xs text-muted text-center">Errors also appear in browser console</p>
             </div>
           )}
 
@@ -1608,6 +1679,10 @@
           if (splitType === 'equal')   { setErr('Select at least one person.'); return; }
           if (splitType === 'percent') { setErr(`Percentages must sum to 100% — currently ${pctTotal.toFixed(2)}%`); return; }
           if (splitType === 'exact')   { setErr('Enter amounts for at least one person.'); return; }
+          if (splitType === 'exact' && Math.abs(exTotal - total) > 0.02) {
+            setErr(`Split amounts (${fmt(exTotal, currency)}) must equal the total (${fmt(total, currency)})`);
+            return;
+          }
         }
         setLoad(true);
         try {
@@ -1947,7 +2022,14 @@
         try {
           await removeMemberFromTrip(m.id);
           await onRefresh();
-        } catch(e) { alert(e?.message || 'Could not remove member.'); }
+        } catch(e) {
+          const msg = e?.message || '';
+          if (msg.includes('foreign key') || msg.includes('violates')) {
+            alert(`${m.name} can't be removed because they have expenses recorded against them. Delete their expenses first.`);
+          } else {
+            alert(msg || 'Could not remove member.');
+          }
+        }
         setRemoving(null);
       };
 
